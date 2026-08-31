@@ -142,6 +142,8 @@ class CoreCaAnchorsOpensslTest : public testing::Test {
     // anchor [1] is GlobalSign Root CA (the cross-signature's root).
     gtsRootR4Only = writePem("core-anchor-gtsr4.pem", nthCert(core_ca::kMidadCoreCaAnchors, 0));
     globalSignOnly = writePem("core-anchor-globalsign.pem", nthCert(core_ca::kMidadCoreCaAnchors, 1));
+    // The constant the pinned wolfSSL pairing path actually loads.
+    gtsRootR4Constant = writePem("core-anchor-gtsr4-constant.pem", core_ca::kMidadCoreCaGtsRootR4);
 
     leaf = fixture("api-midad-leaf.pem");
     tamperedLeaf = fixture("api-midad-leaf-tampered.pem");
@@ -156,6 +158,7 @@ class CoreCaAnchorsOpensslTest : public testing::Test {
   std::string anchors;
   std::string gtsRootR4Only;
   std::string globalSignOnly;
+  std::string gtsRootR4Constant;
   std::string leaf;
   std::string tamperedLeaf;
   std::string unrelatedRoot;
@@ -184,6 +187,14 @@ TEST(CoreCaAnchorsContent, ExactlyTwoAnchorsNoKeyMaterial) {
   EXPECT_EQ(pem.find("PRIVATE KEY"), std::string::npos);
 }
 
+// kMidadCoreCaGtsRootR4 must be the audited anchor, not a second capture of it.
+TEST(CoreCaAnchorsContent, GtsRootR4ConstantIsTheFirstAuditedAnchor) {
+  const std::string standalone = core_ca::kMidadCoreCaGtsRootR4;
+  EXPECT_EQ(standalone, nthCert(core_ca::kMidadCoreCaAnchors, 0));
+  EXPECT_TRUE(nthCert(standalone, 1).empty());  // exactly one certificate
+  EXPECT_EQ(standalone.find("PRIVATE KEY"), std::string::npos);
+}
+
 TEST(CoreCaAnchorsContent, BothAnchorsAreExtractable) {
   EXPECT_FALSE(nthCert(core_ca::kMidadCoreCaAnchors, 0).empty());
   EXPECT_FALSE(nthCert(core_ca::kMidadCoreCaAnchors, 1).empty());
@@ -203,6 +214,31 @@ TEST_F(CoreCaAnchorsOpensslTest, ServedCrossSignedPathNeedsGlobalSignRootCa) {
 
 TEST_F(CoreCaAnchorsOpensslTest, AlternatePathNeedsGtsRootR4) {
   EXPECT_TRUE(verifyChain({gtsRootR4Only, alternateIntermediates, leaf, "api.midad.one"}));
+}
+
+// The property the pinned wolfSSL path depends on: with the redundant
+// cross-certificate STILL on the wire, anchoring at GTS Root R4 alone verifies
+// the served chain. A verifier that discards the trailing certificate whose
+// subject it already trusts (openssl by default; wolfSSL with
+// WOLFSSL_ALT_CERT_CHAINS, which scripts/patch_wolfssl_midad.py sets) therefore
+// never has to check that certificate's RSA-2048 signature.
+TEST_F(CoreCaAnchorsOpensslTest, GtsRootR4AloneVerifiesTheServedChain) {
+  EXPECT_TRUE(verifyChain({gtsRootR4Constant, servedIntermediates, leaf, "api.midad.one"}));
+  EXPECT_TRUE(verifyChain({gtsRootR4Constant, alternateIntermediates, leaf, "api.midad.one"}));
+}
+
+// Dropping the second anchor must not have dropped any other check with it.
+TEST_F(CoreCaAnchorsOpensslTest, GtsRootR4AloneStillRejectsAWrongHostname) {
+  EXPECT_FALSE(verifyChain({gtsRootR4Constant, servedIntermediates, leaf, "api.midad.one.evil.example"}));
+  EXPECT_FALSE(verifyChain({gtsRootR4Constant, servedIntermediates, leaf, "evil.example"}));
+  EXPECT_FALSE(verifyChain({gtsRootR4Constant, alternateIntermediates, leaf, "a.b.api.midad.one"}));
+}
+
+TEST_F(CoreCaAnchorsOpensslTest, GtsRootR4AloneStillRejectsWrongCaTamperedAndExpired) {
+  EXPECT_FALSE(verifyChain({unrelatedRoot, servedIntermediates, leaf, "api.midad.one"}));
+  EXPECT_FALSE(verifyChain({gtsRootR4Constant, servedIntermediates, tamperedLeaf, "api.midad.one"}));
+  EXPECT_FALSE(verifyChain({gtsRootR4Constant, servedIntermediates, leaf, "api.midad.one", kVerifyAfterLeafExpiry}));
+  EXPECT_FALSE(verifyChain({gtsRootR4Constant, "", leaf, "api.midad.one"}));
 }
 
 TEST_F(CoreCaAnchorsOpensslTest, EverySanTheLeafAdvertisesIsAccepted) {

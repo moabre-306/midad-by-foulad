@@ -49,8 +49,8 @@
 // ROOTS, not the served intermediates: WE1 is a five-year intermediate that
 // rotates, the roots do not.
 //
-// NOT a fix for the observed X3 pairing failure, and deliberately not wired
-// into any request path here. The `esp-x509-crt-bundle: Certificate matched but
+// NOT a fix for the mbedTLS path: nothing here changes what
+// HttpDownloader::postJson does. The `esp-x509-crt-bundle: Certificate matched but
 // signature verification failed` seen on device is not a missing anchor -- the
 // anchor was FOUND (that is what "matched" means) and the failure code 0x4290
 // decodes as MBEDTLS_ERR_RSA_PUBLIC_FAILED + MBEDTLS_ERR_MPI_ALLOC_FAILED, an
@@ -58,10 +58,11 @@
 // HttpDownloader.cpp's redirect-header block records the same signature from an
 // earlier incident ("PK verify failed with an MPI/RSA allocation error ... with
 // the largest contiguous block down to ~21KB by then"). What this anchor set is
-// for is the path that has no bundle at all: wolfSSL's SecureClient carries no
-// default trust store, and verifying the alternate path against GTS Root R4 is
-// pure ECDSA -- no RSA modular exponentiation anywhere in the chain, which is
-// precisely the allocation the mbedTLS path fails on.
+// for is the path that has no bundle at all: wolfSSL carries no default trust
+// store, and verifying the alternate path against GTS Root R4 is pure ECDSA --
+// no RSA modular exponentiation anywhere in the chain, which is precisely the
+// allocation the mbedTLS path fails on. That path is
+// HttpDownloader::postJsonWolf, which loads kMidadCoreCaGtsRootR4 (below).
 //
 // static constexpr: ~2.0KB stays in flash (CLAUDE.md "constexpr First"), never
 // copied to DRAM.
@@ -101,6 +102,46 @@ yj1hTdNGCbM+w6DjY1Ub8rrvrTnhQ7k4o+YviiY776BQVvnGCv04zcQLcFGUl5gE
 AbEVtQwdpf5pLGkkeB6zpxxxYu7KyJesF12KwvhHhm4qxFYxldBniYUr+WymXUad
 DKqC5JlR3XC321Y9YeRq4VzW9v493kHMB65jUr9TU/Qr6cf9tveCX4XSQRjbgbME
 HMUfpIBvFSDJ3gyICh3WZlXi/EjJKSZp4A==
+-----END CERTIFICATE-----
+)PEMCERT";
+
+// GTS Root R4 alone: the anchor set the wolfSSL pairing path loads.
+//
+// Byte-identical to the first certificate of kMidadCoreCaAnchors above (proved
+// by test/core_ca_anchors, which compares them) -- the same audited key
+// material, not a second capture.
+//
+// It exists because WHICH anchor a verifier terminates at decides what
+// arithmetic it must do. With GlobalSign Root CA also in the store, wolfSSL
+// verifies the trailing cross-certificate's own RSA-2048 signature: internal.c's
+// ProcessPeerCerts parses and verifies every chain certificate before it asks
+// whether that certificate was already a known signer (ProcessPeerCertParse
+// computes alreadySigner AFTER ParseCertRelative), so being trusted twice does
+// not skip the work. With only GTS Root R4 loaded, that certificate finds no
+// issuer, fails with ASN_NO_SIGNER_E without performing any signature check at
+// all, and WOLFSSL_ALT_CERT_CHAINS (set by scripts/patch_wolfssl_midad.py)
+// tolerates exactly that for a CA certificate -- leaving the real path,
+// leaf <- WE1 <- GTS Root R4, verified end to end on ECDSA P-256 and P-384.
+// That is the whole point: no RSA modular exponentiation anywhere in the walk.
+//
+// Compatibility cost of dropping GlobalSign Root CA HERE: none for this
+// verifier. The cross-certificate is redundant when its subject is already
+// trusted, and the day Google stops sending it (it must by 2028-01-28) the
+// served chain becomes the alternate path this anchor already covers.
+// kMidadCoreCaAnchors keeps both for verifiers that anchor at the top of the
+// presented chain instead, ESP-IDF's bundle callback among them.
+inline constexpr char kMidadCoreCaGtsRootR4[] = R"PEMCERT(-----BEGIN CERTIFICATE-----
+MIICCjCCAZGgAwIBAgIQbkepyIuUtui7OyrYorLBmTAKBggqhkjOPQQDAzBHMQsw
+CQYDVQQGEwJVUzEiMCAGA1UEChMZR29vZ2xlIFRydXN0IFNlcnZpY2VzIExMQzEU
+MBIGA1UEAxMLR1RTIFJvb3QgUjQwHhcNMTYwNjIyMDAwMDAwWhcNMzYwNjIyMDAw
+MDAwWjBHMQswCQYDVQQGEwJVUzEiMCAGA1UEChMZR29vZ2xlIFRydXN0IFNlcnZp
+Y2VzIExMQzEUMBIGA1UEAxMLR1RTIFJvb3QgUjQwdjAQBgcqhkjOPQIBBgUrgQQA
+IgNiAATzdHOnaItgrkO4NcWBMHtLSZ37wWHO5t5GvWvVYRg1rkDdc/eJkTBa6zzu
+hXyiQHY7qca4R9gq55KRanPpsXI5nymfopjTX15YhmUPoYRlBtHci8nHc8iMai/l
+xKvRHYqjQjBAMA4GA1UdDwEB/wQEAwIBBjAPBgNVHRMBAf8EBTADAQH/MB0GA1Ud
+DgQWBBSATNbrdP9JNqPV2Py1PsVq8JQdjDAKBggqhkjOPQQDAwNnADBkAjBqUFJ0
+CMRw3J5QdCHojXohw0+WbhXRIjVhLfoIN+4Zba3bssx9BzT1YBkstTTZbyACMANx
+sbqjYAuG7ZoIapVon+Kz4ZNkfF6Tpt95LY2F45TPI11xzPKwTdb+mciUqXWi4w==
 -----END CERTIFICATE-----
 )PEMCERT";
 

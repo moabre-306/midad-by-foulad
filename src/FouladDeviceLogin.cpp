@@ -7,6 +7,7 @@
 
 #include "FouladDeviceTracking.h"
 #include "FouladEbooksConfig.h"
+#include "network/CoreCaCerts.h"
 #include "network/HttpDownloader.h"
 
 namespace {
@@ -40,7 +41,8 @@ FouladDeviceLogin::StartResult FouladDeviceLogin::start() {
   serializeJson(requestDoc, body);
 
   std::string response;
-  const auto err = HttpDownloader::postJson(FOULAD_EBOOKS_DEVICE_LOGIN_START_URL, body, "", "", response);
+  const auto err = HttpDownloader::postJsonWolf(FOULAD_EBOOKS_DEVICE_LOGIN_START_URL, body,
+                                                core_ca::kMidadCoreCaGtsRootR4, response);
   if (err != HttpDownloader::OK) {
     const auto failure = HttpDownloader::getLastFailure();
     LOG_ERR("QRLOGIN", "start failed: err=%d stage=%d detail=%d", static_cast<int>(err),
@@ -99,7 +101,8 @@ FouladDeviceLogin::PollResult FouladDeviceLogin::poll(const std::string& session
   serializeJson(requestDoc, body);
 
   std::string response;
-  const auto err = HttpDownloader::postJson(FOULAD_EBOOKS_DEVICE_LOGIN_POLL_URL, body, "", "", response);
+  const auto err =
+      HttpDownloader::postJsonWolf(FOULAD_EBOOKS_DEVICE_LOGIN_POLL_URL, body, core_ca::kMidadCoreCaGtsRootR4, response);
   if (err != HttpDownloader::OK) {
     // 401 is Core's "invalid_session"; 404/410 are the legacy server's shape for
     // the same thing. All three mean this session no longer exists, which is the

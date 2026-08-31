@@ -144,6 +144,32 @@ class HttpDownloader {
                                 const std::string& password, std::string& outResponse, int timeoutMs = 15000);
 
   /**
+   * POST a small pre-serialized JSON body over the wolfSSL transport, verified
+   * against caAnchorsPem -- one or more concatenated PEM certificates supplied
+   * by the caller -- instead of ESP-IDF's certificate bundle. Same return
+   * convention as postJson (any 2xx succeeds; getLastFailure()'s STATUS detail
+   * carries the raw status code).
+   *
+   * What it buys over postJson, and why a caller would choose it: mbedTLS
+   * anchors whatever the server sent at the TOP of the presented chain, so a
+   * chain whose last link is a cross-certificate signed by an RSA root has to
+   * be verified with an RSA modular exponentiation -- an allocation that fails
+   * outright at the free heap this device has left mid-session. Handing wolfSSL
+   * a trust store that terminates one link earlier lets the same chain verify
+   * on pure ECDSA. Verification is stricter here, not weaker: the chain must
+   * reach one of these anchors AND the certificate must name the URL's host
+   * (see VerifiedTlsSession), with no bundle fallback and no plaintext path --
+   * a non-https URL, an empty anchor set, or a build without wolfSSL is
+   * refused rather than downgraded.
+   *
+   * Deliberately not the default for every POST: the anchor set is the
+   * caller's to choose and get right, which only makes sense for an endpoint
+   * whose operator this firmware knows.
+   */
+  static DownloadError postJsonWolf(const std::string& url, const std::string& jsonBody, const char* caAnchorsPem,
+                                    std::string& outResponse, int timeoutMs = 15000);
+
+  /**
    * HTTP DELETE with optional Basic Auth, buffering any (expected-small) response
    * body into outResponse.
    *

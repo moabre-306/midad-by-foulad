@@ -51,10 +51,12 @@ constexpr char FOULAD_EBOOKS_FONT_CONVERT_URL[] = "http://midad.one/api/fonts/co
 // cookies/CSRF. Nothing secret is sent TO these endpoints; the token they return
 // is what replaces the account password on the wire.
 //
-// Both run through HttpDownloader::postJson, which stays on esp_http_client with
-// the full esp_crt_bundle regardless of FREEINK_NET_WOLFSSL -- so the pairing
-// handshake is genuinely verified. Certificate validity needs a roughly correct
-// clock, which is why the WiFi connect path syncs NTP before any HTTPS call.
+// Both run through HttpDownloader::postJsonWolf: wolfSSL, verified against the
+// pinned api.midad.one anchor (src/network/CoreCaCerts.h) rather than the
+// esp_crt_bundle, with the certificate's hostname checked against the URL's.
+// Every other endpoint here still uses postJson/esp_http_client unchanged.
+// Certificate validity needs a roughly correct clock, which is why the WiFi
+// connect path syncs NTP before any HTTPS call.
 constexpr char FOULAD_EBOOKS_DEVICE_LOGIN_START_URL[] = "https://api.midad.one/device-login/start";
 constexpr char FOULAD_EBOOKS_DEVICE_LOGIN_POLL_URL[] = "https://api.midad.one/device-login/poll";
 

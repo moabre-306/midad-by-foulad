@@ -13,6 +13,8 @@
 #include <strings.h>  // strcasecmp, for the case-insensitive response-header match
 
 #include <algorithm>
+#include <cctype>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <string>
@@ -25,6 +27,9 @@
 
 #if defined(FREEINK_NET_WOLFSSL)
 #include <SecureHttpClient.h>
+
+#include "HttpUrlParts.h"
+#include "VerifiedTlsSession.h"
 
 extern "C" void wolfSSL_Arduino_Serial_Print(const char* const msg) { LOG_DBG("WOLFSSL", "%s", msg); }
 #endif
@@ -245,6 +250,236 @@ HttpDownloader::DownloadError runGetWolf(const std::string& startUrl, const std:
   return HttpDownloader::HTTP_ERROR;
 }
 #endif
+
+#if defined(FREEINK_NET_WOLFSSL)
+// --- verified-wolfSSL JSON POST ---------------------------------------------
+//
+// A second POST path, deliberately NOT a variant of runPostJson: it never
+// touches esp_http_client or the ESP-IDF certificate bundle. The chain is
+// checked against the anchors the caller hands in, on wolfSSL, whose ECDSA
+// verification runs through the single-precision P-256/P-384 code
+// (WOLFSSL_HAVE_SP_ECC + WOLFSSL_SP_384) instead of mbedTLS's bignum RSA path.
+//
+// Only what a small JSON exchange needs is implemented: one request, no
+// redirect following (a redirect off the pinned host could not be verified
+// against these anchors anyway, so it is surfaced to the caller as its 3xx
+// status), no connection reuse, no streaming.
+constexpr size_t WOLF_JSON_READ_CHUNK = 512;
+constexpr size_t WOLF_JSON_MAX_RESPONSE = 16384;
+constexpr size_t WOLF_JSON_MAX_LINE = 1024;
+
+// Reads one CRLF-terminated line (CR stripped). False on timeout or a closed
+// connection with nothing pending.
+bool wolfReadLine(VerifiedTlsSession& tls, std::string& line, const uint32_t timeoutMs) {
+  line.clear();
+  uint32_t deadline = millis() + timeoutMs;
+  uint8_t ch = 0;
+  while (static_cast<int32_t>(millis() - deadline) < 0) {
+    const int got = tls.read(&ch, 1);
+    if (got < 0) return false;
+    if (got == 0) {
+      delay(2);
+      continue;
+    }
+    deadline = millis() + timeoutMs;
+    if (ch == '\n') {
+      if (!line.empty() && line.back() == '\r') line.pop_back();
+      return true;
+    }
+    if (line.size() >= WOLF_JSON_MAX_LINE) return false;
+    line += static_cast<char>(ch);
+  }
+  return false;
+}
+
+// Appends exactly `count` bytes to out. False on timeout, close or the cap.
+bool wolfReadFixed(VerifiedTlsSession& tls, const size_t count, std::string& out, uint8_t* buf,
+                   const uint32_t timeoutMs) {
+  size_t remaining = count;
+  uint32_t deadline = millis() + timeoutMs;
+  while (remaining > 0) {
+    const size_t want = remaining < WOLF_JSON_READ_CHUNK ? remaining : WOLF_JSON_READ_CHUNK;
+    const int got = tls.read(buf, want);
+    if (got < 0) return false;
+    if (got == 0) {
+      if (static_cast<int32_t>(millis() - deadline) >= 0) return false;
+      delay(2);
+      continue;
+    }
+    deadline = millis() + timeoutMs;
+    out.append(reinterpret_cast<const char*>(buf), static_cast<size_t>(got));
+    if (out.size() > WOLF_JSON_MAX_RESPONSE) return false;
+    remaining -= static_cast<size_t>(got);
+  }
+  return true;
+}
+
+// Reads until the peer closes: the framing a response with neither
+// Content-Length nor chunked encoding uses.
+bool wolfReadUntilClose(VerifiedTlsSession& tls, std::string& out, uint8_t* buf, const uint32_t timeoutMs) {
+  uint32_t deadline = millis() + timeoutMs;
+  while (true) {
+    const int got = tls.read(buf, WOLF_JSON_READ_CHUNK);
+    if (got < 0) return !tls.connected();  // clean end of stream
+    if (got == 0) {
+      if (static_cast<int32_t>(millis() - deadline) >= 0) return false;
+      delay(2);
+      continue;
+    }
+    deadline = millis() + timeoutMs;
+    out.append(reinterpret_cast<const char*>(buf), static_cast<size_t>(got));
+    if (out.size() > WOLF_JSON_MAX_RESPONSE) return false;
+  }
+}
+
+bool wolfReadChunked(VerifiedTlsSession& tls, std::string& out, uint8_t* buf, const uint32_t timeoutMs) {
+  std::string line;
+  while (true) {
+    if (!wolfReadLine(tls, line, timeoutMs)) return false;
+    const size_t ext = line.find(';');  // chunk extensions are ignored
+    const std::string sizeText = ext == std::string::npos ? line : line.substr(0, ext);
+    char* parseEnd = nullptr;
+    const unsigned long size = strtoul(sizeText.c_str(), &parseEnd, 16);
+    if (parseEnd == sizeText.c_str()) return false;
+    if (size == 0) {
+      while (wolfReadLine(tls, line, timeoutMs) && !line.empty()) {  // drain trailers
+      }
+      return true;
+    }
+    if (!wolfReadFixed(tls, size, out, buf, timeoutMs)) return false;
+    if (!wolfReadLine(tls, line, timeoutMs)) return false;  // chunk's trailing CRLF
+  }
+}
+
+HttpDownloader::DownloadError runPostJsonWolf(const std::string& url, const std::string& jsonBody,
+                                              const char* caAnchorsPem, std::string& outResponse, const int timeoutMs) {
+  setLastFailure(HttpDownloader::FailStage::NONE, 0);
+  outResponse.clear();
+  WifiPowerSaveGuard psGuard;
+
+  HttpUrlParts parts;
+  if (!parseHttpUrl(url, parts)) {
+    LOG_ERR("HTTP", "wolfSSL postJson: unparseable URL");
+    setLastFailure(HttpDownloader::FailStage::OPEN, 0);
+    return HttpDownloader::HTTP_ERROR;
+  }
+  // No plaintext path out of this function: a caller asking for pinned
+  // verification over http:// has asked for something that cannot be delivered.
+  if (!parts.https) {
+    LOG_ERR("HTTP", "wolfSSL postJson refuses a non-https URL");
+    setLastFailure(HttpDownloader::FailStage::OPEN, 0);
+    return HttpDownloader::HTTP_ERROR;
+  }
+  if (!caAnchorsPem || !*caAnchorsPem) {
+    LOG_ERR("HTTP", "wolfSSL postJson called without trust anchors");
+    setLastFailure(HttpDownloader::FailStage::OPEN, 0);
+    return HttpDownloader::HTTP_ERROR;
+  }
+
+  // One reused read buffer for the whole response; the line reader works a byte
+  // at a time out of wolfSSL's already-decrypted record, so only the body needs it.
+  auto buf = makeUniqueNoThrow<uint8_t[]>(WOLF_JSON_READ_CHUNK);
+  if (!buf) {
+    LOG_ERR("HTTP", "OOM: %u byte read buffer (free heap: %u bytes)", (unsigned)WOLF_JSON_READ_CHUNK,
+            ESP.getFreeHeap());
+    setLastFailure(HttpDownloader::FailStage::BUFFER_OOM, static_cast<int>(ESP.getFreeHeap()));
+    return HttpDownloader::HTTP_ERROR;
+  }
+
+  VerifiedTlsSession tls;
+  if (!tls.connect(parts.host.c_str(), parts.port, caAnchorsPem, static_cast<uint32_t>(timeoutMs))) {
+    setLastFailure(HttpDownloader::FailStage::OPEN, tls.lastError());
+    return HttpDownloader::HTTP_ERROR;
+  }
+
+  std::string request;
+  request.reserve(256 + jsonBody.size());
+  request += "POST " + parts.path + " HTTP/1.1\r\n";
+  request += "Host: " + parts.host;
+  if (parts.port != 443) request += ":" + std::to_string(parts.port);
+  request += "\r\n";
+  request += "User-Agent: CrossPoint-ESP32-" CROSSPOINT_VERSION "\r\n";
+  request += "Content-Type: application/json\r\n";
+  request += "Accept: application/json\r\n";
+  // Same host-gated device identifier every other request carries, so
+  // server-side revocation keeps working on this path too.
+  if (isFouladEbooksUrl(url)) {
+    const std::string serial = FouladDeviceTracking::getSerialNumber();
+    if (!serial.empty()) request += "X-Device-Serial: " + serial + "\r\n";
+  }
+  request += "Content-Length: " + std::to_string(jsonBody.size()) + "\r\n";
+  request += "Connection: close\r\n\r\n";
+  request += jsonBody;
+
+  if (tls.write(reinterpret_cast<const uint8_t*>(request.data()), request.size()) < 0) {
+    LOG_ERR("HTTP", "wolfSSL postJson write failed");
+    setLastFailure(HttpDownloader::FailStage::OPEN, tls.lastError());
+    return HttpDownloader::HTTP_ERROR;
+  }
+  request.clear();
+  request.shrink_to_fit();
+
+  std::string line;
+  if (!wolfReadLine(tls, line, static_cast<uint32_t>(timeoutMs)) || line.size() < 12) {
+    LOG_ERR("HTTP", "wolfSSL postJson: no status line");
+    setLastFailure(HttpDownloader::FailStage::READ, 0);
+    return HttpDownloader::HTTP_ERROR;
+  }
+  const int status = atoi(line.c_str() + 9);  // "HTTP/1.1 201 Created"
+
+  size_t contentLength = 0;
+  bool haveContentLength = false;
+  bool chunked = false;
+  while (wolfReadLine(tls, line, static_cast<uint32_t>(timeoutMs))) {
+    if (line.empty()) break;  // end of headers
+    const size_t colon = line.find(':');
+    if (colon == std::string::npos) continue;
+    std::string name = line.substr(0, colon);
+    std::string value = line.substr(colon + 1);
+    while (!value.empty() && value.front() == ' ') value.erase(value.begin());
+    if (strcasecmp(name.c_str(), "content-length") == 0) {
+      contentLength = static_cast<size_t>(strtoul(value.c_str(), nullptr, 10));
+      haveContentLength = true;
+    } else if (strcasecmp(name.c_str(), "transfer-encoding") == 0) {
+      std::transform(value.begin(), value.end(), value.begin(),
+                     [](unsigned char c) { return static_cast<char>(tolower(c)); });
+      chunked = value.find("chunked") != std::string::npos;
+    }
+  }
+
+  // Any 2xx: /device-login/start answers 201 Created with the pairing payload.
+  if (status < 200 || status > 299) {
+    // Not necessarily worth logging loudly -- a 401 from /device-login/poll is
+    // the documented "this session is gone". Callers read getLastFailure().detail.
+    LOG_DBG("HTTP", "wolfSSL postJson non-2xx status: %d", status);
+    setLastFailure(HttpDownloader::FailStage::STATUS, status);
+    HEAP_TRACE_MARK("HTTP.cleanup", "BEGIN");
+    tls.stop();
+    HEAP_TRACE_MARK("HTTP.cleanup", "END");
+    return HttpDownloader::HTTP_ERROR;
+  }
+
+  bool bodyOk;
+  if (chunked)
+    bodyOk = wolfReadChunked(tls, outResponse, buf.get(), static_cast<uint32_t>(timeoutMs));
+  else if (haveContentLength)
+    bodyOk = wolfReadFixed(tls, contentLength, outResponse, buf.get(), static_cast<uint32_t>(timeoutMs));
+  else
+    bodyOk = wolfReadUntilClose(tls, outResponse, buf.get(), static_cast<uint32_t>(timeoutMs));
+
+  HEAP_TRACE_MARK("HTTP.cleanup", "BEGIN");
+  tls.stop();
+  HEAP_TRACE_MARK("HTTP.cleanup", "END");
+
+  if (!bodyOk) {
+    LOG_ERR("HTTP", "wolfSSL postJson body incomplete after %zu bytes", outResponse.size());
+    setLastFailure(HttpDownloader::FailStage::INCOMPLETE,
+                   static_cast<int>(std::min<size_t>(outResponse.size(), INT32_MAX)));
+    return HttpDownloader::HTTP_ERROR;
+  }
+  return HttpDownloader::OK;
+}
+#endif  // FREEINK_NET_WOLFSSL
 
 // Streams a GET body through sink.write in READ_CHUNK pieces. Uses the manual
 // open/fetch_headers/read path rather than esp_http_client_perform(): perform()
@@ -1063,6 +1298,24 @@ HttpDownloader::DownloadError HttpDownloader::postJson(const std::string& url, c
                                                        std::string& outResponse, int timeoutMs) {
   LOG_DBG("HTTP", "Posting JSON: %s", url.c_str());
   return runPostJson(url, jsonBody, username, password, outResponse, timeoutMs);
+}
+
+HttpDownloader::DownloadError HttpDownloader::postJsonWolf(const std::string& url, const std::string& jsonBody,
+                                                           const char* caAnchorsPem, std::string& outResponse,
+                                                           int timeoutMs) {
+#if defined(FREEINK_NET_WOLFSSL)
+  LOG_DBG("HTTP", "Posting JSON (wolfSSL, pinned anchors): %s", url.c_str());
+  return runPostJsonWolf(url, jsonBody, caAnchorsPem, outResponse, timeoutMs);
+#else
+  // Fail closed. Falling back to the bundle path would silently answer a
+  // request for these anchors with a different trust decision.
+  (void)jsonBody;
+  (void)caAnchorsPem;
+  (void)timeoutMs;
+  outResponse.clear();
+  LOG_ERR("HTTP", "wolfSSL transport not built in; refusing pinned POST: %s", url.c_str());
+  return HTTP_ERROR;
+#endif
 }
 
 HttpDownloader::DownloadError HttpDownloader::deleteRequest(const std::string& url, const std::string& username,
