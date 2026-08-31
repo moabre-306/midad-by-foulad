@@ -14,6 +14,7 @@
 #include <string_view>
 
 #include "FontCacheManager.h"
+#include "RegionGeometry.h"
 
 namespace {
 
@@ -280,36 +281,19 @@ void GfxRenderer::ensureSdGlyphsResident(const int fontId, const char* text, con
 
 // Translate logical (x,y) coordinates to physical panel coordinates based on current orientation
 // This should always be inlined for better performance
+// The rotation itself lives in RegionGeometry so the region-snapshot sizing math
+// built on it stays host-testable (see RegionGeometry.h).
+static_assert(static_cast<int>(GfxRenderer::Portrait) == RegionGeometry::Portrait, "orientation enums must match");
+static_assert(static_cast<int>(GfxRenderer::LandscapeClockwise) == RegionGeometry::LandscapeClockwise,
+              "orientation enums must match");
+static_assert(static_cast<int>(GfxRenderer::PortraitInverted) == RegionGeometry::PortraitInverted,
+              "orientation enums must match");
+static_assert(static_cast<int>(GfxRenderer::LandscapeCounterClockwise) == RegionGeometry::LandscapeCounterClockwise,
+              "orientation enums must match");
+
 static inline void rotateCoordinates(const GfxRenderer::Orientation orientation, const int x, const int y, int* phyX,
                                      int* phyY, const uint16_t panelWidth, const uint16_t panelHeight) {
-  switch (orientation) {
-    case GfxRenderer::Portrait: {
-      // Logical portrait (480x800) → panel (800x480)
-      // Rotation: 90 degrees clockwise
-      *phyX = y;
-      *phyY = panelHeight - 1 - x;
-      break;
-    }
-    case GfxRenderer::LandscapeClockwise: {
-      // Logical landscape (800x480) rotated 180 degrees (swap top/bottom and left/right)
-      *phyX = panelWidth - 1 - x;
-      *phyY = panelHeight - 1 - y;
-      break;
-    }
-    case GfxRenderer::PortraitInverted: {
-      // Logical portrait (480x800) → panel (800x480)
-      // Rotation: 90 degrees counter-clockwise
-      *phyX = panelWidth - 1 - y;
-      *phyY = x;
-      break;
-    }
-    case GfxRenderer::LandscapeCounterClockwise: {
-      // Logical landscape (800x480) aligned with panel orientation
-      *phyX = x;
-      *phyY = y;
-      break;
-    }
-  }
+  RegionGeometry::rotate(static_cast<int>(orientation), x, y, phyX, phyY, panelWidth, panelHeight);
 }
 
 // Output of screenRectToAlignedMemRect: a rectangle in panel-memory
@@ -2999,51 +2983,18 @@ void GfxRenderer::tapToLogical(float nx, float ny, int& outX, int& outY) const {
   }
 }
 
-// Translate a logical rect through rotateCoordinates and take the bounding
+// Translate a logical rect through the panel rotation and take the bounding
 // box of its four corners on the physical panel. Output coords are inclusive
 // and clamped. Returns false if the rect ends up fully off-panel.
 static bool logicalRectToPhysicalBounds(GfxRenderer::Orientation orientation, int lx, int ly, int lw, int lh,
                                         uint16_t panelWidth, uint16_t panelHeight, int* outX0, int* outY0, int* outX1,
                                         int* outY1) {
-  if (lw <= 0 || lh <= 0) return false;
-  int minX = INT32_MAX;
-  int minY = INT32_MAX;
-  int maxX = INT32_MIN;
-  int maxY = INT32_MIN;
-  const int corners[4][2] = {{lx, ly}, {lx + lw - 1, ly}, {lx, ly + lh - 1}, {lx + lw - 1, ly + lh - 1}};
-  for (auto& c : corners) {
-    int phyX;
-    int phyY;
-    rotateCoordinates(orientation, c[0], c[1], &phyX, &phyY, panelWidth, panelHeight);
-    if (phyX < minX) minX = phyX;
-    if (phyY < minY) minY = phyY;
-    if (phyX > maxX) maxX = phyX;
-    if (phyY > maxY) maxY = phyY;
-  }
-  if (minX < 0) minX = 0;
-  if (minY < 0) minY = 0;
-  if (maxX >= panelWidth) maxX = panelWidth - 1;
-  if (maxY >= panelHeight) maxY = panelHeight - 1;
-  if (minX > maxX || minY > maxY) return false;
-  *outX0 = minX;
-  *outY0 = minY;
-  *outX1 = maxX;
-  *outY1 = maxY;
-  return true;
+  return RegionGeometry::physicalBounds(static_cast<int>(orientation), lx, ly, lw, lh, panelWidth, panelHeight, outX0,
+                                        outY0, outX1, outY1);
 }
 
 size_t GfxRenderer::getRegionByteSize(int lx, int ly, int lw, int lh) const {
-  int x0, y0, x1, y1;
-  if (!logicalRectToPhysicalBounds(orientation, lx, ly, lw, lh, panelWidth, panelHeight, &x0, &y0, &x1, &y1)) {
-    return 0;
-  }
-  // x bounds are in pixels; widen to byte boundaries on either side so per-row
-  // memcpy stays byte-aligned even when the logical rect doesn't.
-  const int byteX0 = x0 / 8;
-  const int byteX1 = x1 / 8;
-  const int bytesPerRow = byteX1 - byteX0 + 1;
-  const int rowCount = y1 - y0 + 1;
-  return static_cast<size_t>(bytesPerRow) * static_cast<size_t>(rowCount);
+  return RegionGeometry::byteSize(static_cast<int>(orientation), lx, ly, lw, lh, panelWidth, panelHeight);
 }
 
 bool GfxRenderer::copyRegionToBuffer(int lx, int ly, int lw, int lh, uint8_t* buf, size_t bufSize) const {
