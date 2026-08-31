@@ -21,6 +21,7 @@ void FontDecompressor::deinit() {
   alignedOffsetTable = nullptr;
   alignedOffsetTableFont = nullptr;
   alignedOffsetTableSize = 0;
+  allocFloor.reset();
 }
 
 void FontDecompressor::clearCache() {
@@ -39,11 +40,11 @@ void FontDecompressor::freePageBuffer() {
     pageSlots[s] = {};
   }
   pageSlotCount = 0;
+  allocFloor.reset();  // memory returned to the heap; stop suppressing
 }
 
 void FontDecompressor::freeHotGroup() {
-  failedGroupFont = nullptr;
-  failedGroupIndex = UINT16_MAX;
+  allocFloor.reset();  // memory returned to the heap; stop suppressing
   free(hotGroup);
   hotGroup = nullptr;
   hotGroupCapacity = 0;
@@ -54,12 +55,22 @@ void FontDecompressor::freeHotGroup() {
   hotGlyphBufCapacity = 0;
 }
 
+void* FontDecompressor::allocGuarded(const uint32_t bytes) {
+  if (allocFloor.suppresses(bytes)) return nullptr;
+  void* p = malloc(bytes);
+  if (!p) allocFloor.noteFailure(bytes);
+  return p;
+}
+
 bool FontDecompressor::ensureCapacity(uint8_t*& buf, uint32_t& capacity, uint32_t needed) {
   if (capacity >= needed) return true;
+  // Suppressed before freeing, not after: a grow that cannot possibly succeed must
+  // not also destroy the perfectly usable smaller buffer already held.
+  if (allocFloor.suppresses(needed)) return false;
   // Grow-only, free-then-malloc: every caller fully rewrites the buffer after a grow, so the
   // old contents are dead -- freeing first gives the allocator its best shot on a tight heap.
   free(buf);
-  buf = static_cast<uint8_t*>(malloc(needed));  // owned by FontDecompressor, freed in freeHotGroup()
+  buf = static_cast<uint8_t*>(allocGuarded(needed));  // owned by FontDecompressor, freed in freeHotGroup()
   capacity = buf ? needed : 0;
   return buf != nullptr;
 }
@@ -144,7 +155,7 @@ bool FontDecompressor::ensureAlignedOffsetTable(const EpdFontData* fontData) {
   const uint32_t totalGlyphs = lastInterval.offset + (lastInterval.last - lastInterval.first + 1);
   if (totalGlyphs == 0) return false;
 
-  auto* table = static_cast<uint32_t*>(malloc(totalGlyphs * sizeof(uint32_t)));
+  auto* table = static_cast<uint32_t*>(allocGuarded(totalGlyphs * sizeof(uint32_t)));
   if (!table) {
     LOG_ERR("FDC", "OOM allocating %lu-entry aligned-offset table", (unsigned long)totalGlyphs);
     return false;
@@ -261,19 +272,16 @@ const uint8_t* FontDecompressor::getBitmap(const EpdFontData* fontData, const Ep
     const EpdFontGroup& group = fontData->groups[groupIndex];
 
     // ensureCapacity may free the buffer, so the cached-group identity dies with it either way.
+    const bool wasSuppressed = allocFloor.suppresses(group.uncompressedSize);
     hotGroupFont = nullptr;
     hotGroupIndex = UINT16_MAX;
-    // Already known to be unaffordable, and nothing has been freed since. Bail
-    // without allocating or logging -- the caller gets the same nullptr either way.
-    if (failedGroupFont == fontData && failedGroupIndex == groupIndex) {
-      stats.bitmapAllocFailures++;
-      stats.getBitmapTimeUs += micros() - tStart;
-      return nullptr;
-    }
     if (!ensureCapacity(hotGroup, hotGroupCapacity, group.uncompressedSize)) {
-      failedGroupFont = fontData;
-      failedGroupIndex = groupIndex;
-      LOG_ERR("FDC", "Failed to allocate %u bytes for hot group %u", group.uncompressedSize, groupIndex);
+      // Log only the attempt that actually reached malloc. Everything the size floor
+      // turns away afterwards is the same already-reported condition, and logging it
+      // per glyph is what buried the real first failure under 144 identical lines.
+      if (!wasSuppressed) {
+        LOG_ERR("FDC", "Failed to allocate %u bytes for hot group %u", group.uncompressedSize, groupIndex);
+      }
       stats.bitmapAllocFailures++;
       if (stats.firstFailedAllocBytes == 0) stats.firstFailedAllocBytes = group.uncompressedSize;
       stats.getBitmapTimeUs += micros() - tStart;
@@ -289,16 +297,16 @@ const uint8_t* FontDecompressor::getBitmap(const EpdFontData* fontData, const Ep
     hotGroupFont = fontData;
     hotGroupIndex = groupIndex;
     stats.hotGroupBytes = group.uncompressedSize;
-    // Memory is evidently available again; stop suppressing whatever failed before.
-    failedGroupFont = nullptr;
-    failedGroupIndex = UINT16_MAX;
   } else {
     stats.cacheHits++;
   }
 
   // Compact just the requested glyph from byte-aligned data into scratch buffer
+  const bool scratchWasSuppressed = allocFloor.suppresses(glyph->dataLength);
   if (!ensureCapacity(hotGlyphBuf, hotGlyphBufCapacity, glyph->dataLength)) {
-    LOG_ERR("FDC", "Failed to allocate %u bytes for glyph scratch", (unsigned)glyph->dataLength);
+    if (!scratchWasSuppressed) {
+      LOG_ERR("FDC", "Failed to allocate %u bytes for glyph scratch", (unsigned)glyph->dataLength);
+    }
     stats.bitmapAllocFailures++;
     if (stats.firstFailedAllocBytes == 0) stats.firstFailedAllocBytes = glyph->dataLength;
     stats.getBitmapTimeUs += micros() - tStart;
@@ -475,8 +483,8 @@ int FontDecompressor::prewarmCache(const EpdFontData* fontData, const char* utf8
   // bitmap data) -- malloc(0) is implementation-defined and commonly returns nullptr,
   // which isn't an allocation failure in that case. Only skip the buffer malloc (and
   // its nullptr check) when there's nothing to store.
-  slot.buffer = totalBytes > 0 ? static_cast<uint8_t*>(malloc(totalBytes)) : nullptr;
-  slot.glyphs = static_cast<PageGlyphEntry*>(malloc(glyphCount * sizeof(PageGlyphEntry)));
+  slot.buffer = totalBytes > 0 ? static_cast<uint8_t*>(allocGuarded(totalBytes)) : nullptr;
+  slot.glyphs = static_cast<PageGlyphEntry*>(allocGuarded(glyphCount * sizeof(PageGlyphEntry)));
   if ((totalBytes > 0 && !slot.buffer) || !slot.glyphs) {
     LOG_ERR("FDC", "Failed to allocate page buffer (%u bytes, %u glyphs)", totalBytes, glyphCount);
     if (stats.firstFailedAllocBytes == 0) {
@@ -517,6 +525,15 @@ int FontDecompressor::prewarmCache(const EpdFontData* fontData, const char* utf8
   auto groupAlignedTrackerBuf = makeUniqueNoThrow<uint32_t[]>(MAX_PAGE_GROUPS);
   if (!groupAlignedTrackerBuf) {
     LOG_ERR("FDC", "OOM allocating %u-entry group offset tracker", MAX_PAGE_GROUPS);
+    // Give the slot back rather than leaving it registered: without the aligned
+    // offsets computed below, every glyph in it falls through to the hot-group path
+    // anyway, so its (potentially tens of KB) buffer would sit there serving nothing
+    // until the next clearCache() -- on the exact code path that just proved the heap
+    // is short.
+    free(slot.buffer);
+    free(slot.glyphs);
+    slot = {};
+    pageSlotCount--;
     return -1;
   }
   uint32_t* groupAlignedTracker = groupAlignedTrackerBuf.get();  // running byte-aligned offset per needed group
@@ -595,9 +612,14 @@ int FontDecompressor::prewarmCache(const EpdFontData* fontData, const char* utf8
     uint16_t groupIdx = neededGroups[g];
     const EpdFontGroup& group = fontData->groups[groupIdx];
 
-    auto* tempBuf = static_cast<uint8_t*>(malloc(group.uncompressedSize));
+    // Through the floor: this loop runs once per group, so an exhausted heap would
+    // otherwise re-issue an equally impossible malloc for every remaining group.
+    const bool tempWasSuppressed = allocFloor.suppresses(group.uncompressedSize);
+    auto* tempBuf = static_cast<uint8_t*>(allocGuarded(group.uncompressedSize));
     if (!tempBuf) {
-      LOG_ERR("FDC", "Failed to allocate temp buffer (%u bytes) for group %u", group.uncompressedSize, groupIdx);
+      if (!tempWasSuppressed) {
+        LOG_ERR("FDC", "Failed to allocate temp buffer (%u bytes) for group %u", group.uncompressedSize, groupIdx);
+      }
       missed++;
       continue;
     }
