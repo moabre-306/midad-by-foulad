@@ -24,6 +24,15 @@ class HomeActivity final : public Activity {
   bool coverBufferStored = false;  // Track if cover buffer is stored
   uint8_t* coverBuffer = nullptr;  // HomeActivity's own buffer for cover image
   size_t coverBufferSize = 0;      // Bytes allocated to coverBuffer
+  // Latches once the snapshot has been refused or has failed, so the attempt is
+  // made at most once per Home entry instead of once per render. Without it a
+  // request the heap can never serve (42,768 bytes on an X3, whose largest free
+  // block is 38,900 even at a clean boot) is re-issued on every redraw, because
+  // coverRendered only latches when the snapshot succeeded -- an OOM line every
+  // ~2s for as long as the screen is open. Covers are unaffected: they are
+  // redrawn from the cached thumb BMPs exactly as they are on the first render.
+  // Re-armed in onEnter() and wherever Home deliberately frees heap.
+  bool coverBufferDenied = false;
   // Logical rect last passed to drawRecentBookCover. The cover snapshot only
   // needs to cover this region, not the entire framebuffer, so we cache the
   // tile instead of all 48 KB. Set in render() before the call.

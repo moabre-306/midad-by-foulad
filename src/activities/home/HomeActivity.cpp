@@ -2,6 +2,7 @@
 
 #include <Bitmap.h>
 #include <Epub.h>
+#include <FontCacheManager.h>
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
 #include <HalDisplay.h>
@@ -16,6 +17,7 @@
 
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
+#include "HomeCoverBudget.h"
 #include "MappedInputManager.h"
 #include "RecentBooksStore.h"
 #include "SilentRestart.h"
@@ -87,6 +89,15 @@ void HomeActivity::loadRecentCovers(int coverHeight) {
     freeCoverBuffer();
     coverRendered = false;
     READING_STATS.releaseMemory();
+    // The font decompressor's per-group glyph buffers (up to ~12KB for one group,
+    // plus the whole-font aligned-offset table) are allocated lazily by the very
+    // first glyph Home renders and then held for the process lifetime: nothing
+    // outside the reader/dictionary screens runs a PrewarmScope, and those scopes
+    // are the only thing that ever calls clearCache(). Release them here for the
+    // same reason the snapshot and the stats vectors go: this is the one path on
+    // Home that needs every spare block. They are rebuilt on demand afterwards.
+    if (auto* fcm = renderer.getFontCacheManager()) fcm->clearCache();
+    coverBufferDenied = false;
   }
 
   // Fresh-boot rule, learned the hard way across three on-device iterations:
@@ -212,6 +223,7 @@ void HomeActivity::onEnter() {
   lockNextBackRelease = mappedInput.isPressed(MappedInputManager::Button::Back);
 
   lastIdleWhitenMs = millis();
+  coverBufferDenied = false;
 
   // Trigger first update
   requestUpdate();
@@ -228,11 +240,33 @@ bool HomeActivity::storeCoverBuffer() {
   // render() must have already set the cover rect; without it we'd be back to
   // cloning the whole framebuffer.
   if (coverRectW <= 0 || coverRectH <= 0) return false;
-  freeCoverBuffer();
+  if (coverBufferDenied) return false;
   const size_t needed = renderer.getRegionByteSize(coverRectX, coverRectY, coverRectW, coverRectH);
   if (needed == 0) return false;
+
+  // Reuse before reallocating: the rect only changes with orientation, so on every
+  // ordinary redraw the buffer already on hand is exactly the right size, and
+  // free/malloc of a ~40KB block for it is pure fragmentation.
+  if (coverBuffer && coverBufferSize == needed) {
+    return renderer.copyRegionToBuffer(coverRectX, coverRectY, coverRectW, coverRectH, coverBuffer, coverBufferSize);
+  }
+
+  // Budget check BEFORE freeing anything: a refusal must not also throw away a
+  // usable buffer. See HomeCoverBudget.h for why the rule is a reserve rather
+  // than a size cap.
+  const uint32_t freeHeap = ESP.getFreeHeap();
+  const uint32_t maxAlloc = ESP.getMaxAllocHeap();
+  if (!HomeCoverBudget::fits(needed, freeHeap, maxAlloc)) {
+    coverBufferDenied = true;
+    LOG_ERR("HOME", "Cover snapshot declined: %u bytes, free %u, maxAlloc %u", (unsigned)needed, (unsigned)freeHeap,
+            (unsigned)maxAlloc);
+    return false;
+  }
+
+  freeCoverBuffer();
   coverBuffer = static_cast<uint8_t*>(malloc(needed));
   if (!coverBuffer) {
+    coverBufferDenied = true;
     LOG_ERR("HOME", "OOM: cover buffer (%u bytes)", (unsigned)needed);
     return false;
   }
