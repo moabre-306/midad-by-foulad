@@ -1,6 +1,7 @@
 #include "HttpDownloader.h"
 
 #include <Arduino.h>
+#include <HeapTrace.h>
 #include <Logging.h>
 #include <Memory.h>
 #include <UrlOrigin.h>
@@ -107,6 +108,12 @@ void logTlsError(esp_http_client_handle_t client) {
     // (e.g. 0x3000 for MBEDTLS_ERR_X509_FATAL_ERROR, which mbedtls's own headers define
     // as -0x3000) -- print it as mbedTLS's own negative convention for readability.
     LOG_ERR("HTTP", "tls detail: esp_tls_error_code=-0x%X esp_tls_flags=0x%X", tlsErrorCode, tlsFlags);
+    // TEMP diagnostic: a single combined code hides which half is the real cause.
+    // 0x4290 is MBEDTLS_ERROR_ADD(MBEDTLS_ERR_RSA_PUBLIC_FAILED, MBEDTLS_ERR_MPI_ALLOC_FAILED)
+    // -- an out-of-memory inside the signature check, not a rejected certificate.
+    // esp_tls_flags == 0 alongside it says the chain itself verified fine.
+    HEAP_TRACE_REPORT_MBEDTLS("tls detail:", tlsErrorCode);
+    HEAP_TRACE_REPORT_FAILURE("tls failure");
   }
 }
 int httpClientWrite(esp_http_client_handle_t client, const char* data, int len) {
@@ -303,14 +310,20 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
   // servers over plain http (esp_http_client picks the transport from the URL
   // scheme, so http:// needs no cert config). The prior setInsecure() worked
   // only because Arduino's ssl_client drives mbedtls directly.
+  // TEMP diagnostic: see the matching note in runPostJson -- the bundle is parsed
+  // inside the handshake, not here.
+  HEAP_TRACE_MARK("HTTP.bundleAttach", "BEGIN");
   config.crt_bundle_attach = esp_crt_bundle_attach;
+  HEAP_TRACE_MARK("HTTP.bundleAttach", "END");
   config.keep_alive_enable = true;
   if (conditional) {
     config.event_handler = captureResponseEtag;
     config.user_data = conditional;
   }
 
+  HEAP_TRACE_MARK("HTTP.clientInit", "BEGIN");
   esp_http_client_handle_t client = esp_http_client_init(&config);
+  HEAP_TRACE_MARK("HTTP.clientInit", "END");
   if (!client) {
     LOG_ERR("HTTP", "client init failed");
     setLastFailure(HttpDownloader::FailStage::CLIENT_INIT, 0);
@@ -334,7 +347,9 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
   // open()/read() does not auto-follow redirects (only perform() does), so step
   // 30x responses manually. OPDS download endpoints and the GitHub release CDN
   // both redirect.
+  HEAP_TRACE_MARK("TLS.handshake", "BEGIN");
   esp_err_t err = esp_http_client_open(client, 0);
+  HEAP_TRACE_MARK("TLS.handshake", err == ESP_OK ? "END-OK" : "END-FAIL");
   if (err != ESP_OK) {
     // ESP_ERR_HTTP_CONNECT alone doesn't say whether this was heap pressure, DNS
     // failure, TCP-level rejection/timeout, or a TLS handshake problem, so also
@@ -344,8 +359,11 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
     LOG_ERR("HTTP", "open failed: %s (errno=%d, free heap: %u bytes)", esp_err_to_name(err), getHttpClientErrno(client),
             ESP.getFreeHeap());
     logTlsError(client);
+    HEAP_TRACE_REPORT_FAILURE("get open");
     setLastFailure(HttpDownloader::FailStage::OPEN, static_cast<int>(err));
+    HEAP_TRACE_MARK("HTTP.cleanup", "BEGIN");
     esp_http_client_cleanup(client);
+    HEAP_TRACE_MARK("HTTP.cleanup", "END");
     return HttpDownloader::HTTP_ERROR;
   }
   int64_t contentLength = esp_http_client_fetch_headers(client);
@@ -403,13 +421,18 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
     }
 
     esp_http_client_close(client);
+    HEAP_TRACE_MARK("TLS.handshake.redirect", "BEGIN");
     err = esp_http_client_open(client, 0);
+    HEAP_TRACE_MARK("TLS.handshake.redirect", err == ESP_OK ? "END-OK" : "END-FAIL");
     if (err != ESP_OK) {
       LOG_ERR("HTTP", "redirect open failed: %s (errno=%d, free heap: %u bytes)", esp_err_to_name(err),
               getHttpClientErrno(client), ESP.getFreeHeap());
       logTlsError(client);
+      HEAP_TRACE_REPORT_FAILURE("redirect open");
       setLastFailure(HttpDownloader::FailStage::REDIRECT, static_cast<int>(err));
+      HEAP_TRACE_MARK("HTTP.cleanup", "BEGIN");
       esp_http_client_cleanup(client);
+      HEAP_TRACE_MARK("HTTP.cleanup", "END");
       return HttpDownloader::HTTP_ERROR;
     }
     contentLength = esp_http_client_fetch_headers(client);
@@ -550,10 +573,16 @@ HttpDownloader::DownloadError runPostFile(const std::string& url,
   config.buffer_size = HTTP_RX_BUF;
   config.buffer_size_tx = HTTP_TX_BUF;
   config.timeout_ms = timeoutMs;
+  // TEMP diagnostic: assigning the hook costs nothing; esp-tls parses the bundle
+  // inside the handshake, so the cost shows up under TLS.handshake, not here.
+  HEAP_TRACE_MARK("HTTP.bundleAttach", "BEGIN");
   config.crt_bundle_attach = esp_crt_bundle_attach;
+  HEAP_TRACE_MARK("HTTP.bundleAttach", "END");
   config.keep_alive_enable = true;
 
+  HEAP_TRACE_MARK("HTTP.clientInit", "BEGIN");
   esp_http_client_handle_t client = esp_http_client_init(&config);
+  HEAP_TRACE_MARK("HTTP.clientInit", "END");
   if (!client) {
     LOG_ERR("HTTP", "client init failed");
     setLastFailure(HttpDownloader::FailStage::CLIENT_INIT, 0);
@@ -791,10 +820,16 @@ HttpDownloader::DownloadError runPostJson(const std::string& url, const std::str
   config.buffer_size = HTTP_RX_BUF;
   config.buffer_size_tx = HTTP_TX_BUF;
   config.timeout_ms = timeoutMs;
+  // TEMP diagnostic: assigning the hook costs nothing; esp-tls parses the bundle
+  // inside the handshake, so the cost shows up under TLS.handshake, not here.
+  HEAP_TRACE_MARK("HTTP.bundleAttach", "BEGIN");
   config.crt_bundle_attach = esp_crt_bundle_attach;
+  HEAP_TRACE_MARK("HTTP.bundleAttach", "END");
   config.keep_alive_enable = true;
 
+  HEAP_TRACE_MARK("HTTP.clientInit", "BEGIN");
   esp_http_client_handle_t client = esp_http_client_init(&config);
+  HEAP_TRACE_MARK("HTTP.clientInit", "END");
   if (!client) {
     LOG_ERR("HTTP", "client init failed");
     setLastFailure(HttpDownloader::FailStage::CLIENT_INIT, 0);
@@ -811,13 +846,23 @@ HttpDownloader::DownloadError runPostJson(const std::string& url, const std::str
     esp_http_client_set_header(client, "Authorization", header.c_str());
   }
 
+  // TEMP diagnostic: esp_http_client_open() is where the TCP connect, the CA
+  // bundle parse and the whole TLS handshake happen. Bracketed BEFORE and AFTER
+  // deliberately -- a heap reading taken after esp_http_client_cleanup() describes
+  // a heap that has already been handed the evidence back, which is exactly what
+  // made an out-of-memory look like a trust failure.
+  HEAP_TRACE_MARK("TLS.handshake", "BEGIN");
   esp_err_t err = esp_http_client_open(client, static_cast<int>(jsonBody.size()));
+  HEAP_TRACE_MARK("TLS.handshake", err == ESP_OK ? "END-OK" : "END-FAIL");
   if (err != ESP_OK) {
     LOG_ERR("HTTP", "postJson open failed: %s (errno=%d, free heap: %u bytes)", esp_err_to_name(err),
             getHttpClientErrno(client), ESP.getFreeHeap());
     logTlsError(client);
+    HEAP_TRACE_REPORT_FAILURE("postJson open");
     setLastFailure(HttpDownloader::FailStage::OPEN, static_cast<int>(err));
+    HEAP_TRACE_MARK("HTTP.cleanup", "BEGIN");
     esp_http_client_cleanup(client);
+    HEAP_TRACE_MARK("HTTP.cleanup", "END");
     return HttpDownloader::HTTP_ERROR;
   }
 
@@ -878,7 +923,9 @@ HttpDownloader::DownloadError runPostJson(const std::string& url, const std::str
     }
   }
 
+  HEAP_TRACE_MARK("HTTP.cleanup", "BEGIN");
   esp_http_client_cleanup(client);
+  HEAP_TRACE_MARK("HTTP.cleanup", "END");
   return HttpDownloader::OK;
 }
 

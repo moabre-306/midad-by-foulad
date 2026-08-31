@@ -1,6 +1,7 @@
 #include "FouladQrLoginActivity.h"
 
 #include <GfxRenderer.h>
+#include <HeapTrace.h>
 #include <I18n.h>
 #include <Logging.h>
 #include <WiFi.h>
@@ -15,6 +16,7 @@
 #include "util/QrUtils.h"
 
 void FouladQrLoginActivity::onEnter() {
+  HEAP_TRACE_SCOPE("QRLOGIN.construct");
   Activity::onEnter();
   state = State::ConnectingWifi;
   WiFi.mode(WIFI_STA);
@@ -40,6 +42,9 @@ void FouladQrLoginActivity::onWifiSelectionComplete(const bool success) {
 }
 
 void FouladQrLoginActivity::beginSession() {
+  // TEMP diagnostic: everything the HTTPS session-start costs -- client init, CA
+  // bundle attach, TLS handshake, response read, cleanup -- falls inside here.
+  HEAP_TRACE_SCOPE("QRLOGIN.beginSession");
   session = FouladDeviceLogin::start();
   if (!session.ok) {
     state = State::Failed;

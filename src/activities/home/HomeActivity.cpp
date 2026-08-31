@@ -7,6 +7,7 @@
 #include <GfxRenderer.h>
 #include <HalDisplay.h>
 #include <HalStorage.h>
+#include <HeapTrace.h>
 #include <I18n.h>
 #include <Utf8.h>
 #include <Xtc.h>
@@ -203,6 +204,7 @@ void HomeActivity::loadRecentCovers(int coverHeight) {
 }
 
 void HomeActivity::onEnter() {
+  HEAP_TRACE_SCOPE("HOME.onEnter");
   Activity::onEnter();
 
   // Drop entries whose files were deleted since the store was loaded, so the
@@ -224,6 +226,9 @@ void HomeActivity::onEnter() {
 
   lastIdleWhitenMs = millis();
   coverBufferDenied = false;
+#if defined(X3_HEAP_TRACE) && X3_HEAP_TRACE
+  traceSnapshotAttempts = 0;
+#endif
 
   // Trigger first update
   requestUpdate();
@@ -241,6 +246,13 @@ bool HomeActivity::storeCoverBuffer() {
   // cloning the whole framebuffer.
   if (coverRectW <= 0 || coverRectH <= 0) return false;
   if (coverBufferDenied) return false;
+#if defined(X3_HEAP_TRACE) && X3_HEAP_TRACE
+  // TEMP diagnostic: proves the latch. On an X3 this must print exactly once per
+  // Home entry (attempt=1, followed by the "declined" line) and never again --
+  // the pre-fix behaviour was one attempt, and one OOM line, per render.
+  ++traceSnapshotAttempts;
+  HEAP_TRACE_EVENT("HOME.snapshot", "attempt=%u", (unsigned)traceSnapshotAttempts);
+#endif
   const size_t needed = renderer.getRegionByteSize(coverRectX, coverRectY, coverRectW, coverRectH);
   if (needed == 0) return false;
 
@@ -260,6 +272,8 @@ bool HomeActivity::storeCoverBuffer() {
     coverBufferDenied = true;
     LOG_ERR("HOME", "Cover snapshot declined: %u bytes, free %u, maxAlloc %u", (unsigned)needed, (unsigned)freeHeap,
             (unsigned)maxAlloc);
+    HEAP_TRACE_EVENT("HOME.snapshot", "DECLINED needed=%u latched (covers fall back to the cached thumb BMPs)",
+                     (unsigned)needed);
     return false;
   }
 
@@ -501,6 +515,7 @@ void HomeActivity::loop() {
 }
 
 void HomeActivity::render(RenderLock&&) {
+  HEAP_TRACE_SCOPE("HOME.render");
   const auto& metrics = UITheme::getInstance().getMetrics();
   const auto pageWidth = renderer.getScreenWidth();
   const auto pageHeight = renderer.getScreenHeight();
@@ -520,9 +535,16 @@ void HomeActivity::render(RenderLock&&) {
   coverRectW = pageWidth;
   coverRectH = metrics.homeCoverTileHeight;
 
+  // TEMP diagnostic: with the snapshot declined, restored=0 on every render and the
+  // covers are redrawn from the cached thumb BMPs instead -- the fallback path.
+  // coverRendered flipping to 1 afterwards is the proof they actually drew.
+  HEAP_TRACE_EVENT("HOME.cover", "draw restored=%d stored=%d rendered(before)=%d books=%u", bufferRestored ? 1 : 0,
+                   coverBufferStored ? 1 : 0, coverRendered ? 1 : 0, (unsigned)recentBooks.size());
   GUI.drawRecentBookCover(renderer, Rect{0, metrics.homeTopPadding, pageWidth, metrics.homeCoverTileHeight},
                           recentBooks, selectorIndex, coverRendered, coverBufferStored, bufferRestored,
                           std::bind(&HomeActivity::storeCoverBuffer, this));
+  HEAP_TRACE_EVENT("HOME.cover", "drawn rendered(after)=%d stored=%d", coverRendered ? 1 : 0,
+                   coverBufferStored ? 1 : 0);
 
   // Order: eBooks, Stats, Files, Settings -- matches menuItemToIndex/indexToMenuItem.
   // Short labels chosen to fit the bottom icon bar tiles. Recent Books has no

@@ -2,6 +2,7 @@
 
 #include <HalDisplay.h>
 #include <HalStorage.h>
+#include <HeapTrace.h>
 #include <InflateStream.h>
 #include <Logging.h>
 #include <Memory.h>
@@ -590,7 +591,13 @@ bool PngToBmpConverter::pngFileToBmpStreamInternal(HalFile& pngFile, Print& bmpO
   bool oneShotMode = false;
   std::unique_ptr<uint8_t[]> oneShotBuffer;
   const size_t oneShotTotalBytes = static_cast<size_t>(rawRowBytes + 1) * height;
-  if (!ctx.reader.init(true)) {
+  // TEMP diagnostic: this init() is the 32KB ring-buffer allocation, comfortably
+  // the largest single request in the cover pipeline. Bracketed on its own so the
+  // fallback below can be told apart from the ring buffer actually being served.
+  HEAP_TRACE_MARK("PNG.ringBuffer", "BEGIN");
+  const bool ringBufferOk = ctx.reader.init(true);
+  HEAP_TRACE_MARK("PNG.ringBuffer", ringBufferOk ? "END-OK" : "END-REFUSED");
+  if (!ringBufferOk) {
     // Fall back to one-shot decode: it resolves back-references directly against the
     // destination buffer instead of a separate window, so it needs no extra 32KB
     // allocation at all -- just the (much smaller) decompressed image data itself. Only

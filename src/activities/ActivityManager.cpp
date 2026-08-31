@@ -5,6 +5,7 @@
 #include <HalDisplay.h>
 #include <HalGPIO.h>
 #include <HalPowerManager.h>
+#include <HeapTrace.h>
 #include <Memory.h>
 #ifndef SIMULATOR
 #include <BlePeripheralManager.h>
@@ -385,7 +386,11 @@ void ActivityManager::goHome(HomeMenuItem initialMenuItem, bool cleanInitialRefr
       initialMenuItem = HomeMenuItem::FOULAD_EBOOKS;
     }
   }
+  // TEMP diagnostic: brackets construction only. HomeActivity::onEnter/render carry
+  // their own scopes, so the three appear nested in the log.
+  HEAP_TRACE_MARK("HOME.construct", "BEGIN");
   replaceActivity(std::make_unique<HomeActivity>(renderer, mappedInput, initialMenuItem, cleanInitialRefresh));
+  HEAP_TRACE_MARK("HOME.construct", "END");
 }
 void ActivityManager::goToCrashReport() { replaceActivity(std::make_unique<CrashActivity>(renderer, mappedInput)); }
 

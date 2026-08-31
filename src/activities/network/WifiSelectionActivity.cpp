@@ -2,6 +2,7 @@
 
 #include <GfxRenderer.h>
 #include <HalClock.h>
+#include <HeapTrace.h>
 #include <I18n.h>
 #include <Logging.h>
 #include <WiFi.h>
@@ -96,6 +97,9 @@ void WifiSelectionActivity::onExit() {
 }
 
 void WifiSelectionActivity::startWifiScan(const bool autoScan) {
+  // TEMP diagnostic: brackets WiFi stack bring-up (radio init + async scan start),
+  // which is the first large allocator on the network path.
+  HEAP_TRACE_SCOPE("WIFI.start");
   autoConnecting = autoScan;
   manualNetworkListRequested = false;
   state = WifiSelectionState::SCANNING;
@@ -351,6 +355,9 @@ void WifiSelectionActivity::showNetworkListFromAutoConnect() {
 }
 
 void WifiSelectionActivity::attemptConnection() {
+  // TEMP diagnostic: brackets WiFi.begin() only. Association completes
+  // asynchronously; the paired "WIFI.connected" mark below is the real end edge.
+  HEAP_TRACE_SCOPE("WIFI.connect");
   state = autoConnecting ? WifiSelectionState::AUTO_CONNECTING : WifiSelectionState::CONNECTING;
   connectionStartTime = millis();
   connectedIP.clear();
@@ -406,6 +413,7 @@ void WifiSelectionActivity::checkConnectionStatus() {
     snprintf(ipStr, sizeof(ipStr), "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
     connectedIP = ipStr;
     autoConnecting = false;
+    HEAP_TRACE_MARK("WIFI.connected", "EVENT");
     WifiDiagLog::append("connected: ssid=" + selectedSSID + " ip=" + std::string(ipStr) +
                         " elapsedMs=" + std::to_string(millis() - connectionStartTime));
 

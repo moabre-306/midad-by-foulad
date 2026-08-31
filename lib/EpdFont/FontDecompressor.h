@@ -127,6 +127,15 @@ class FontDecompressor {
   // buffer, prewarm temp buffers -- because they all draw on the same heap.
   // See AllocFloor.h.
   AllocFloor allocFloor;
+#if defined(X3_HEAP_TRACE) && X3_HEAP_TRACE
+  // TEMP diagnostic counters -- remove with the rest of the heap trace. Split so
+  // a hardware run can show the burst converging: reached-malloc failures are the
+  // only ones that cost anything, suppressed calls are the ones AllocFloor turned
+  // away without touching the allocator.
+  uint32_t traceReachedMallocFailures = 0;
+  uint32_t traceSuppressedCalls = 0;
+  void resetTraceBurst();
+#endif
   uint8_t* hotGroup = nullptr;  // owned; freed in freeHotGroup()/dtor
   uint32_t hotGroupCapacity = 0;
 

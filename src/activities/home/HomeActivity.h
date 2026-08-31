@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <functional>
 #include <vector>
 
@@ -33,6 +34,10 @@ class HomeActivity final : public Activity {
   // redrawn from the cached thumb BMPs exactly as they are on the first render.
   // Re-armed in onEnter() and wherever Home deliberately frees heap.
   bool coverBufferDenied = false;
+#if defined(X3_HEAP_TRACE) && X3_HEAP_TRACE
+  // TEMP diagnostic counter -- remove with the rest of the heap trace.
+  uint32_t traceSnapshotAttempts = 0;
+#endif
   // Logical rect last passed to drawRecentBookCover. The cover snapshot only
   // needs to cover this region, not the entire framebuffer, so we cache the
   // tile instead of all 48 KB. Set in render() before the call.

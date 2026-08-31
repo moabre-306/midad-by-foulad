@@ -3,6 +3,7 @@
 #include <Bitmap.h>
 #include <FsHelpers.h>
 #include <HalStorage.h>
+#include <HeapTrace.h>
 #include <JpegToBmpConverter.h>
 #include <Logging.h>
 #include <PngToBmpConverter.h>
@@ -657,6 +658,7 @@ std::string Epub::getThumbBmpPath() const { return cachePath + "/thumb_[HEIGHT].
 std::string Epub::getThumbBmpPath(int height) const { return cachePath + "/thumb_" + std::to_string(height) + ".bmp"; }
 
 bool Epub::generateThumbBmp(int height) const {
+  HEAP_TRACE_SCOPE("EPUB.generateThumbBmp");
   const std::string thumbPath = getThumbBmpPath(height);
   if (Storage.exists(thumbPath.c_str())) {
     // Already generated -- but confirm it's a complete, well-formed BMP first. A partial file

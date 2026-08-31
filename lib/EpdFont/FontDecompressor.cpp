@@ -1,6 +1,7 @@
 #include "FontDecompressor.h"
 
 #include <Arduino.h>
+#include <HeapTrace.h>
 #include <Logging.h>
 #include <Memory.h>
 #include <Utf8.h>
@@ -22,6 +23,9 @@ void FontDecompressor::deinit() {
   alignedOffsetTableFont = nullptr;
   alignedOffsetTableSize = 0;
   allocFloor.reset();
+#if defined(X3_HEAP_TRACE) && X3_HEAP_TRACE
+  resetTraceBurst();
+#endif
 }
 
 void FontDecompressor::clearCache() {
@@ -41,10 +45,16 @@ void FontDecompressor::freePageBuffer() {
   }
   pageSlotCount = 0;
   allocFloor.reset();  // memory returned to the heap; stop suppressing
+#if defined(X3_HEAP_TRACE) && X3_HEAP_TRACE
+  resetTraceBurst();
+#endif
 }
 
 void FontDecompressor::freeHotGroup() {
   allocFloor.reset();  // memory returned to the heap; stop suppressing
+#if defined(X3_HEAP_TRACE) && X3_HEAP_TRACE
+  resetTraceBurst();
+#endif
   free(hotGroup);
   hotGroup = nullptr;
   hotGroupCapacity = 0;
@@ -55,10 +65,41 @@ void FontDecompressor::freeHotGroup() {
   hotGlyphBufCapacity = 0;
 }
 
+#if defined(X3_HEAP_TRACE) && X3_HEAP_TRACE
+// TEMP diagnostic: report and clear the burst counters at every point the class
+// hands memory back, i.e. wherever allocFloor itself is re-armed.
+void FontDecompressor::resetTraceBurst() {
+  if (traceReachedMallocFailures || traceSuppressedCalls) {
+    HEAP_TRACE_EVENT("FDC.alloc", "BURST END reachedMalloc=%u suppressed=%u", (unsigned)traceReachedMallocFailures,
+                     (unsigned)traceSuppressedCalls);
+  }
+  traceReachedMallocFailures = 0;
+  traceSuppressedCalls = 0;
+}
+#endif
+
 void* FontDecompressor::allocGuarded(const uint32_t bytes) {
-  if (allocFloor.suppresses(bytes)) return nullptr;
+  if (allocFloor.suppresses(bytes)) {
+#if defined(X3_HEAP_TRACE) && X3_HEAP_TRACE
+    ++traceSuppressedCalls;
+#endif
+    return nullptr;
+  }
   void* p = malloc(bytes);
-  if (!p) allocFloor.noteFailure(bytes);
+  if (!p) {
+#if defined(X3_HEAP_TRACE) && X3_HEAP_TRACE
+    // TEMP diagnostic: one line per malloc that actually REACHED the allocator
+    // after the floor armed. The burst is bounded when this stops at a handful
+    // of strictly decreasing sizes instead of running to the glyph count, and
+    // the millisecond stamps show whether anything is re-attempting in a tight
+    // loop. Reset alongside allocFloor in resetTraceBurst().
+    ++traceReachedMallocFailures;
+    HEAP_TRACE_EVENT("FDC.alloc", "REFUSED req=%u reachedMalloc=%u suppressed=%u floor=%u ms=%lu", (unsigned)bytes,
+                     (unsigned)traceReachedMallocFailures, (unsigned)traceSuppressedCalls,
+                     (unsigned)(allocFloor.isSuppressing() ? allocFloor.floorBytes : 0u), (unsigned long)millis());
+#endif
+    allocFloor.noteFailure(bytes);
+  }
   return p;
 }
 
@@ -144,6 +185,9 @@ uint32_t FontDecompressor::getAlignedOffset(const EpdFontData* fontData, uint16_
 // caller falls back to the direct per-call computation.
 bool FontDecompressor::ensureAlignedOffsetTable(const EpdFontData* fontData) {
   if (alignedOffsetTableFont == fontData && alignedOffsetTable) return true;
+  // TEMP diagnostic: only the miss path allocates, so the cached-hit early return
+  // above stays out of the trace.
+  HEAP_TRACE_SCOPE("FDC.alignedOffsetTable");
 
   free(alignedOffsetTable);
   alignedOffsetTable = nullptr;
@@ -356,6 +400,7 @@ int32_t FontDecompressor::findGlyphIndex(const EpdFontData* fontData, uint32_t c
 
 int FontDecompressor::prewarmCache(const EpdFontData* fontData, const char* utf8Text) {
   if (!fontData || !fontData->groups || !utf8Text) return 0;
+  HEAP_TRACE_SCOPE("FDC.prewarmCache");
 
   // Allocate the next available slot (caller must call freePageBuffer/clearCache to reset)
   if (pageSlotCount >= MAX_PAGE_SLOTS) {

@@ -14,6 +14,7 @@
 #include <HalStorage.h>
 #include <HalSystem.h>
 #include <HalTiltSensor.h>
+#include <HeapTrace.h>
 #include <I18n.h>
 #include <Logging.h>
 #ifndef SIMULATOR
@@ -633,6 +634,10 @@ void setup() {
   logSerial.setTxTimeoutMs(1);  // This is a load-bearing 1. Do not modify.
 #endif
 #endif
+
+  // TEMP diagnostic: arms the failed-allocation callback before anything else
+  // in setup() can allocate. No-op unless X3_HEAP_TRACE is defined.
+  HEAP_TRACE_BEGIN();
 
   HalSystem::begin();
   // checkPanic() clears the watchdog capture marker after a successful SD
