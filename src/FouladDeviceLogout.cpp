@@ -10,27 +10,27 @@
 
 namespace {
 
-// "Remove me", by serial. The only path a QR-paired device can use: the app API that
-// the fallback in removeThisDevice() calls sits behind RejectDeviceTokenAuth and
-// answers a device token 403, so for every QR install -- the primary sign-in path --
-// that fallback can never succeed.
+// "Remove me". The only path a QR-paired device can use, and the only account
+// mutation a device credential may perform at all.
 //
-// Returns Failed on a 404 so the caller can fall back, since a 404 here means the
-// endpoint is not deployed yet rather than "no such device". The two are told apart by
-// the caller: see removeThisDevice().
+// The request names no target: the token being revoked is the one that
+// authenticated the call, so there is no id or serial to send and no way to reach
+// a sibling reader's credential. The body is empty for the same reason -- the
+// serial this used to carry could only ever have been ignored or trusted, and
+// neither is better than not sending it.
+//
+// Success is 204 No Content (postJson accepts any 2xx). Returns Failed on a 404 so
+// the caller can fall back, since a 404 here means the endpoint is not deployed
+// rather than "no such device"; the two are told apart by the caller. A 401 is not
+// a failure to sign out -- see removeThisDevice().
 FouladDeviceLogout::Result signOutViaDeviceEndpoint(const std::string& username, const std::string& password,
-                                                    const std::string& serial, int& outStatus) {
+                                                    int& outStatus) {
   outStatus = 0;
 
-  JsonDocument requestDoc;
-  requestDoc["serial_number"] = serial;
-  std::string body;
-  serializeJson(requestDoc, body);
-
   std::string response;
-  const auto err = HttpDownloader::postJson(FOULAD_EBOOKS_DEVICE_SIGNOUT_URL, body, username, password, response);
+  const auto err = HttpDownloader::postJson(FOULAD_EBOOKS_DEVICE_SIGNOUT_URL, "{}", username, password, response);
   if (err == HttpDownloader::OK) {
-    LOG_INF("LOGOUT", "signed out via /opds/device/signout");
+    LOG_INF("LOGOUT", "this device's token revoked via /device-login/self-revoke");
     return FouladDeviceLogout::Result::Removed;
   }
 
@@ -58,8 +58,16 @@ FouladDeviceLogout::Result FouladDeviceLogout::removeThisDevice(const std::strin
 
   // Preferred path. Tried first because it is the only one a device token can use.
   int status = 0;
-  if (signOutViaDeviceEndpoint(username, password, ownSerial, status) == Result::Removed) {
+  if (signOutViaDeviceEndpoint(username, password, status) == Result::Removed) {
     return Result::Removed;
+  }
+  if (status == 401) {
+    // The credential this call authenticated with is not live: already revoked from
+    // the phone, or the account is gone. The end state the user asked for already
+    // holds server-side, and keeping a dead token locally only leaves the reader
+    // unable to sign out at all -- so this is success, not a refusal.
+    LOG_INF("LOGOUT", "credential already revoked server-side; clearing it locally");
+    return Result::NotFound;
   }
   if (status == 404) {
     // Two different 404s share this status: the endpoint not being deployed yet, and the

@@ -93,10 +93,13 @@ void FouladQrLoginActivity::pollOnce() {
       return;
 
     case FouladDeviceLogin::PollStatus::Expired:
+    case FouladDeviceLogin::PollStatus::Redeemed:
       // Auto-restart rather than making the user press something: the code is
       // dead and a fresh one is one request away. beginSession() sets Failed if
-      // that request fails, so this cannot spin.
-      LOG_DBG("QRLOGIN", "Pairing code expired, requesting a new one");
+      // that request fails, so this cannot spin. Redeemed lands here for the same
+      // reason -- its one-time token is spent and will never be reissued, so
+      // polling on would wait out the full window for an answer that cannot come.
+      LOG_DBG("QRLOGIN", "Pairing session is spent, requesting a new one");
       beginSession();
       return;
 
@@ -140,9 +143,23 @@ void FouladQrLoginActivity::loop() {
 
   if (state != State::ShowingQr) return;
 
-  // Poll on a millis() gate rather than blocking, so the two buttons above stay
-  // responsive across the whole five-minute window.
+  // The session's own deadline, enforced locally. The server expires a pairing
+  // session after `expires_in` and answers "expired" from then on, but only if it
+  // is reachable and only if it recognises the session at all -- a status this
+  // build does not know is treated as Pending, so without a local clock a single
+  // unexpected response shape means polling a dead code forever. `expires_in` is
+  // the server's own figure, plus one poll interval of slack so the server's
+  // "expired" (which auto-restarts with a fresh code) normally wins the race.
   const unsigned long intervalMs = static_cast<unsigned long>(session.pollIntervalSeconds) * 1000UL;
+  const unsigned long deadlineMs = static_cast<unsigned long>(session.expiresInSeconds) * 1000UL + intervalMs;
+  if (session.expiresInSeconds > 0 && millis() - sessionStartedMs >= deadlineMs) {
+    LOG_DBG("QRLOGIN", "Pairing window elapsed locally, requesting a new code");
+    beginSession();
+    return;
+  }
+
+  // Poll on a millis() gate rather than blocking, so the two buttons above stay
+  // responsive across the whole window.
   if (millis() - lastPollMs < intervalMs) return;
   lastPollMs = millis();
   pollOnce();

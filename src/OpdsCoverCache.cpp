@@ -7,6 +7,9 @@
 #include <OpdsParser.h>
 #include <PngToBmpConverter.h>
 
+#include <cstring>
+#include <string>
+
 #include "network/HttpDownloader.h"
 #include "util/DebugLog.h"
 #include "util/RollingSdLog.h"
@@ -14,6 +17,38 @@
 namespace {
 constexpr char CACHE_DIR[] = "/.crosspoint/opds_covers";
 constexpr char TEMP_PATH[] = "/.crosspoint/opds_covers/.tmp_cover";
+
+// Which decoder the downloaded bytes actually need.
+//
+// The feed's `type` attribute cannot answer this on its own: Midad Core's Library
+// entries carry a cover link with NO type at all (a Library cover resolves in two
+// tiers -- the reader's own image, then the Store book's -- and naming the media
+// type would cost a query per entry, so Atom's optional `type` is simply omitted).
+// An absent type read as "not PNG" sends every Library cover to the JPEG decoder,
+// which fails on all of them. The bytes are authoritative and eight of them settle
+// it, so they decide; the declared type is only the tie-breaker for anything that
+// matches neither signature.
+//
+// Stack-only: an 8-byte buffer and one read, no allocation on a path that is
+// already this close to its heap guard.
+bool downloadedCoverIsPng(HalFile& file, const std::string& declaredType) {
+  static constexpr uint8_t PNG_SIGNATURE[8] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
+  static constexpr uint8_t JPEG_SIGNATURE[3] = {0xFF, 0xD8, 0xFF};
+
+  uint8_t header[sizeof(PNG_SIGNATURE)] = {};
+  const int got = file.read(header, sizeof(header));
+  // Rewind unconditionally: the decoders below read from position 0, and a failed
+  // sniff must not leave the handle advanced.
+  file.seek(0);
+
+  if (got == static_cast<int>(sizeof(PNG_SIGNATURE)) && memcmp(header, PNG_SIGNATURE, sizeof(PNG_SIGNATURE)) == 0) {
+    return true;
+  }
+  if (got >= static_cast<int>(sizeof(JPEG_SIGNATURE)) && memcmp(header, JPEG_SIGNATURE, sizeof(JPEG_SIGNATURE)) == 0) {
+    return false;
+  }
+  return declaredType.find("png") != std::string::npos;
+}
 
 // Same thresholds as OpdsBookBrowserActivity.cpp's hasHeapForCoverWork() (that crash's
 // own diagnosis: a blank-panic report from 1.8.40-rc traced to an ordinary std::string
@@ -105,7 +140,7 @@ bool ensureOpdsCoverCached(const OpdsEntry& entry, const std::string& username, 
   // its own native size rather than padding/stretching it, so upscaling it again here would
   // just blur it for no benefit -- the draw call centers whatever (possibly smaller) size comes
   // out of this instead.
-  const bool isPng = entry.coverType.find("png") != std::string::npos;
+  const bool isPng = downloadedCoverIsPng(src, entry.coverType);
   const bool success = isPng ? PngToBmpConverter::pngFileTo1BitBmpStreamWithSize(src, dst, width, height,
                                                                                  /*allowUpscale=*/false)
                              : JpegToBmpConverter::jpegFileTo1BitBmpStreamWithSize(src, dst, width, height);
