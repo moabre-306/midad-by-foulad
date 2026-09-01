@@ -41,6 +41,11 @@ inline constexpr unsigned long HINT_ATTEMPT_TIMEOUT_MS = 3500;
 // Bound on the post-association SNTP wait, so a blocked NTP path cannot strand the UI.
 inline constexpr unsigned long TIME_SYNC_TIMEOUT_MS = 5000;
 
+// How long to wait for an observed STA disconnect event after asking a superseded hinted
+// attempt to stop, before starting the full-scan attempt regardless. Short: this is the
+// gap between esp_wifi_disconnect() and its own event, not a network operation.
+inline constexpr unsigned long HINT_CANCEL_CONFIRM_TIMEOUT_MS = 500;
+
 // --- BSSID hints -------------------------------------------------------------
 
 inline constexpr size_t BSSID_LEN = 6;

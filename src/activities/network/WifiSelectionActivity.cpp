@@ -19,6 +19,38 @@
 #include "fontIds.h"
 #include "util/WifiDiagLog.h"
 
+#ifndef SIMULATOR
+namespace {
+
+// STA event counters. Written only by the Arduino network-event task, read only by the
+// activity's loop() task: monotonic, 32-bit and naturally aligned, so a reader sees the
+// old or the new value and never a torn one. A mutex would have to be taken inside the
+// event callback to protect nothing.
+//
+// A plain function pointer, not a lambda: WiFi.onEvent()'s std::function overload
+// heap-allocates a closure per registration (see CLAUDE.md on std::function), and
+// nothing here needs to capture. File-static rather than per-activity for the same
+// reason the callback cannot capture -- and because a counter that outlives the
+// activity cannot be left dangling by one.
+//
+// They exist because ESP-IDF's events carry no application-level attempt id. Snapshotting
+// a monotonic counter at each attempt boundary supplies the generation the event itself
+// does not: a GOT_IP that did not advance the counter past an attempt's start belongs to
+// an earlier attempt.
+volatile uint32_t staGotIpEvents = 0;
+volatile uint32_t staDisconnectEvents = 0;
+
+void onStaNetworkEvent(arduino_event_id_t event) {
+  if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
+    ++staGotIpEvents;
+  } else if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+    ++staDisconnectEvents;
+  }
+}
+
+}  // namespace
+#endif
+
 void WifiSelectionActivity::onEnter() {
   Activity::onEnter();
 
@@ -29,6 +61,14 @@ void WifiSelectionActivity::onEnter() {
     WIFI_STORE.loadFromFile();
     WIFI_HINTS.loadFromFile();
   }
+
+#ifndef SIMULATOR
+  // Registered for the whole activity, removed in onExit(): these supply the observable
+  // disconnect boundary the hint fallback waits on, and the generation stamp completion
+  // is validated against.
+  WiFi.onEvent(onStaNetworkEvent, ARDUINO_EVENT_WIFI_STA_GOT_IP);
+  WiFi.onEvent(onStaNetworkEvent, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+#endif
 
   // Reset state
   selectedNetworkIndex = 0;
@@ -47,6 +87,9 @@ void WifiSelectionActivity::onEnter() {
   attemptChannel = 0;
   hintFallbackDone = false;
   awaitingTimeSync = false;
+  hintCancelPending = false;
+  lateCompletionLogged = false;
+  associationMs = 0;
   autoAttemptedSsids.clear();
   autoAttemptedSsids.reserve(WIFI_STORE.getCredentialCount());
 
@@ -88,6 +131,15 @@ void WifiSelectionActivity::onEnter() {
 
 void WifiSelectionActivity::onExit() {
   Activity::onExit();
+
+#ifndef SIMULATOR
+  // Before anything else: the callback must not outlive the activity that armed it.
+  WiFi.removeEvent(onStaNetworkEvent, ARDUINO_EVENT_WIFI_STA_GOT_IP);
+  WiFi.removeEvent(onStaNetworkEvent, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+  HEAP_TRACE_EVENT("TEMP:WIFI.exit", "mode=%d status=%d completions=%u attempts=%lu", static_cast<int>(WiFi.getMode()),
+                   static_cast<int>(WiFi.status()), static_cast<unsigned>(completionCount),
+                   static_cast<unsigned long>(attemptId));
+#endif
 
   LOG_DBG("WIFI", "Free heap at onExit start: %d bytes", ESP.getFreeHeap());
 
@@ -369,6 +421,10 @@ void WifiSelectionActivity::attemptConnection() {
   connectedIP.clear();
   connectionError.clear();
   hintFallbackDone = false;
+  // Cleared here rather than only where cancellation completes: the user can leave an
+  // in-flight cancellation via Confirm (showNetworkListFromAutoConnect) or Back, and a
+  // flag left set would make the next attempt cancel itself on its first tick.
+  hintCancelPending = false;
   WifiDiagLog::append("connecting: ssid=" + selectedSSID + " auto=" + (autoConnecting ? "1" : "0") +
                       " savedPassword=" + (usedSavedPassword ? "1" : "0"));
   // requestUpdate(), not requestUpdateAndWait(): the panel paints as soon as
@@ -430,9 +486,21 @@ void WifiSelectionActivity::beginConnection(const bool useHint) {
 
   const char* password = (selectedRequiresPassword && !enteredPassword.empty()) ? enteredPassword.c_str() : nullptr;
 
+  // New generation for this attempt, with the GOT_IP counter snapshotted against it: a
+  // WL_CONNECTED that does not advance that counter past this point was produced by an
+  // earlier attempt (see completionBelongsToActiveAttempt).
+  ++attemptId;
+  lateCompletionLogged = false;
+#ifndef SIMULATOR
+  gotIpAtAttemptStart = staGotIpEvents;
+#endif
+
   // Last statement before WiFi.begin(): every timeout in wifi_connect_policy is a budget
   // for the radio, so display and SD work must not be charged against it.
   connectionStartTime = millis();
+  HEAP_TRACE_EVENT("TEMP:WIFI.begin", "attempt=%lu mode=%s ch=%u atMs=%lu", static_cast<unsigned long>(attemptId),
+                   attemptChannel != 0 ? "hinted" : "fullscan", static_cast<unsigned>(attemptChannel),
+                   connectionStartTime);
 #ifndef SIMULATOR
   if (attemptChannel != 0) {
     WiFi.begin(selectedSSID.c_str(), password, attemptChannel, attemptBssid, true);
@@ -440,6 +508,57 @@ void WifiSelectionActivity::beginConnection(const bool useHint) {
   }
 #endif
   WiFi.begin(selectedSSID.c_str(), password);
+}
+
+void WifiSelectionActivity::requestHintCancellation(const bool hardFail) {
+  hintCancelPending = true;
+  hintFallbackDone = true;
+  cancelledAttemptId = attemptId;
+  hintCancelStartMs = millis();
+#ifndef SIMULATOR
+  disconnectsAtCancel = staDisconnectEvents;
+#endif
+  HEAP_TRACE_EVENT("TEMP:WIFI.cancelReq", "attempt=%lu reason=%s afterMs=%lu", static_cast<unsigned long>(attemptId),
+                   hardFail ? "failed" : "timeout", millis() - connectionStartTime);
+  WiFi.disconnect(false, false);
+}
+
+bool WifiSelectionActivity::hintCancellationConfirmed() {
+  const unsigned long waitedMs = millis() - hintCancelStartMs;
+#ifndef SIMULATOR
+  const bool confirmed = staDisconnectEvents != disconnectsAtCancel;
+#else
+  const bool confirmed = true;
+#endif
+  if (!confirmed && waitedMs < wifi_connect_policy::HINT_CANCEL_CONFIRM_TIMEOUT_MS) {
+    return false;
+  }
+  HEAP_TRACE_EVENT("TEMP:WIFI.cancelOk", "attempt=%lu confirmed=%d waitedMs=%lu status=%d",
+                   static_cast<unsigned long>(cancelledAttemptId), confirmed ? 1 : 0, waitedMs,
+                   static_cast<int>(WiFi.status()));
+  return true;
+}
+
+bool WifiSelectionActivity::completionBelongsToActiveAttempt() {
+#ifdef SIMULATOR
+  return true;
+#else
+  // A GOT_IP newer than this attempt's start is the only thing that makes a
+  // WL_CONNECTED this attempt's own. Withheld rather than failed: the counter is bumped
+  // by the same event dispatch that sets WL_CONNECTED, so a genuine completion resolves
+  // on the very next tick, while a superseded one never advances the counter and is
+  // left to the ordinary connection timeout.
+  if (staGotIpEvents != gotIpAtAttemptStart) {
+    return true;
+  }
+  if (!lateCompletionLogged) {
+    lateCompletionLogged = true;
+    HEAP_TRACE_EVENT("TEMP:WIFI.lateReject", "activeAttempt=%lu expiredAttempt=%lu gotIp=%lu atStart=%lu",
+                     static_cast<unsigned long>(attemptId), static_cast<unsigned long>(cancelledAttemptId),
+                     static_cast<unsigned long>(staGotIpEvents), static_cast<unsigned long>(gotIpAtAttemptStart));
+  }
+  return false;
+#endif
 }
 
 void WifiSelectionActivity::rememberConnectionHint() {
@@ -460,6 +579,38 @@ void WifiSelectionActivity::checkConnectionStatus() {
 
   const wl_status_t status = WiFi.status();
 
+  // A superseded hinted attempt is still being torn down: nothing may complete, and the
+  // replacement attempt may not start, until that teardown has actually been observed.
+  if (hintCancelPending) {
+    if (status == WL_CONNECTED) {
+      // The expired attempt associated after being told to stop. It cannot be the
+      // replacement -- that has not been issued yet -- so this is attributable, and
+      // acting on it would complete the activity on an attempt already declared dead.
+      if (!lateCompletionLogged) {
+        lateCompletionLogged = true;
+        HEAP_TRACE_EVENT("TEMP:WIFI.lateReject", "activeAttempt=none expiredAttempt=%lu status=%d waitedMs=%lu",
+                         static_cast<unsigned long>(cancelledAttemptId), static_cast<int>(status),
+                         millis() - hintCancelStartMs);
+      }
+    }
+    if (!hintCancellationConfirmed()) {
+      return;
+    }
+    hintCancelPending = false;
+    beginConnection(/*useHint=*/false);
+    // After beginConnection(), so this SD write overlaps the association it follows
+    // rather than delaying it.
+    {
+      RenderLock lock(*this);
+      WIFI_HINTS.forget(selectedSSID);
+    }
+    return;
+  }
+
+  if (status == WL_CONNECTED && !completionBelongsToActiveAttempt()) {
+    return;  // Withheld; the ordinary connection timeout still bounds this.
+  }
+
   if (status == WL_CONNECTED) {
     // Successfully connected
     IPAddress ip = WiFi.localIP();
@@ -468,8 +619,22 @@ void WifiSelectionActivity::checkConnectionStatus() {
     connectedIP = ipStr;
     autoConnecting = false;
     HEAP_TRACE_MARK("WIFI.connected", "EVENT");
+    // elapsedMs is association only -- WiFi.begin() to WL_CONNECTED/GOT_IP. Total
+    // "WiFi ready" is reported separately once the clock sync has also settled, since
+    // that is no longer part of this measurement.
+    associationMs = millis() - connectionStartTime;
     WifiDiagLog::append("connected: ssid=" + selectedSSID + " ip=" + std::string(ipStr) +
-                        " elapsedMs=" + std::to_string(millis() - connectionStartTime));
+                        " elapsedMs=" + std::to_string(associationMs));
+#ifndef SIMULATOR
+    {
+      uint8_t traceBssid[wifi_connect_policy::BSSID_LEN] = {};
+      WiFi.BSSID(traceBssid);
+      HEAP_TRACE_EVENT("TEMP:WIFI.gotip", "attempt=%lu mode=%s bssid=%02x%02x%02x%02x%02x%02x ch=%d assocMs=%lu",
+                       static_cast<unsigned long>(attemptId), attemptChannel != 0 ? "hinted" : "fullscan",
+                       traceBssid[0], traceBssid[1], traceBssid[2], traceBssid[3], traceBssid[4], traceBssid[5],
+                       WiFi.channel(), associationMs);
+    }
+#endif
 
 // Guarded out of the simulator build: crosspoint-simulator's WiFiClass stub
 // doesn't implement BSSID()/channel() either.
@@ -503,6 +668,8 @@ void WifiSelectionActivity::checkConnectionStatus() {
     if (!HalClock::isSystemTimeValid() && HalClock::beginSystemTimeSync()) {
       awaitingTimeSync = true;
       timeSyncStartMs = millis();
+      HEAP_TRACE_EVENT("TEMP:WIFI.ntpBegin", "attempt=%lu boundMs=%lu", static_cast<unsigned long>(attemptId),
+                       wifi_connect_policy::TIME_SYNC_TIMEOUT_MS);
     }
 #endif
 
@@ -540,16 +707,7 @@ void WifiSelectionActivity::checkConnectionStatus() {
     const bool hintHardFail = (status == WL_CONNECT_FAILED || status == WL_NO_SSID_AVAIL);
     if (hintHardFail || millis() - connectionStartTime > wifi_connect_policy::HINT_ATTEMPT_TIMEOUT_MS) {
       WifiDiagLog::append("hint-fallback: ssid=" + selectedSSID + " reason=" + (hintHardFail ? "failed" : "timeout"));
-      hintFallbackDone = true;
-      WiFi.disconnect(false, false);
-      delay(100);
-      beginConnection(/*useHint=*/false);
-      // After beginConnection(), so this SD write overlaps the association it follows
-      // rather than delaying it.
-      {
-        RenderLock lock(*this);
-        WIFI_HINTS.forget(selectedSSID);
-      }
+      requestHintCancellation(hintHardFail);
       return;
     }
   }
@@ -598,6 +756,9 @@ void WifiSelectionActivity::finishWhenClockSynced() {
       return;  // Poll again next tick; the connected screen is already up.
     }
     awaitingTimeSync = false;
+    HEAP_TRACE_EVENT("TEMP:WIFI.ntpEnd", "attempt=%lu synced=%d afterMs=%lu boundMs=%lu",
+                     static_cast<unsigned long>(attemptId), synced ? 1 : 0, millis() - timeSyncStartMs,
+                     wifi_connect_policy::TIME_SYNC_TIMEOUT_MS);
     if (!synced) {
       LOG_ERR("WIFI", "NTP sync did not land; HTTPS cert validation may fail until it does");
     }
@@ -613,6 +774,11 @@ void WifiSelectionActivity::finishWhenClockSynced() {
     }
   }
 
+  // Association and total WiFi-ready are separate figures now that the clock sync runs
+  // asynchronously: assocMs ends at GOT_IP, readyMs at the point the parent may use the
+  // connection for TLS.
+  HEAP_TRACE_EVENT("TEMP:WIFI.ready", "attempt=%lu assocMs=%lu readyMs=%lu", static_cast<unsigned long>(attemptId),
+                   associationMs, millis() - connectionStartTime);
   onComplete(true);
 }
 
@@ -1076,6 +1242,12 @@ void WifiSelectionActivity::renderForgetPrompt(const Rect* screen, const ThemeMe
 }
 
 void WifiSelectionActivity::onComplete(const bool connected) {
+  // Counted, not just logged: a single "completed" line proves nothing about
+  // exactly-once, whereas a second line carrying n=2 would be the failure itself.
+  ++completionCount;
+  HEAP_TRACE_EVENT("TEMP:WIFI.complete", "n=%u attempt=%lu connected=%d", static_cast<unsigned>(completionCount),
+                   static_cast<unsigned long>(attemptId), connected ? 1 : 0);
+
   ActivityResult result;
   result.isCancelled = !connected;
   if (connected) {

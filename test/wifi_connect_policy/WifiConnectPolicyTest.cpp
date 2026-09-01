@@ -61,10 +61,20 @@ TEST(WifiConnectPolicy, AutoBudgetStaysShorterThanAManualConnect) {
 }
 
 TEST(WifiConnectPolicy, HintRetryCannotOutlastAPlainManualAttempt) {
-  // A hinted attempt costs the hint window plus a full retry; that whole sequence must
-  // stay inside the manual budget, or the "fast path" would be the slow one.
+  // A hinted attempt costs the hint window, then the bounded wait for its cancellation
+  // to be confirmed, then a full retry. That whole sequence must stay inside the manual
+  // budget, or the "fast path" would be the slow one.
   EXPECT_LT(HINT_ATTEMPT_TIMEOUT_MS, AUTO_CONNECTION_TIMEOUT_MS);
-  EXPECT_LE(HINT_ATTEMPT_TIMEOUT_MS + AUTO_CONNECTION_TIMEOUT_MS, CONNECTION_TIMEOUT_MS);
+  EXPECT_LE(HINT_ATTEMPT_TIMEOUT_MS + HINT_CANCEL_CONFIRM_TIMEOUT_MS + AUTO_CONNECTION_TIMEOUT_MS,
+            CONNECTION_TIMEOUT_MS);
+}
+
+TEST(WifiConnectPolicy, CancellationConfirmWaitIsShortEnoughToBeInvisible) {
+  // This bounds the gap between esp_wifi_disconnect() and its own STA disconnect event,
+  // not a network operation, so it must stay far below the association budget it
+  // interrupts -- otherwise the safety wait would itself become a timing regression.
+  EXPECT_GT(HINT_CANCEL_CONFIRM_TIMEOUT_MS, 0UL);
+  EXPECT_LE(HINT_CANCEL_CONFIRM_TIMEOUT_MS, HINT_ATTEMPT_TIMEOUT_MS / 4);
 }
 
 TEST(WifiConnectPolicy, ClockSyncWaitIsBounded) {

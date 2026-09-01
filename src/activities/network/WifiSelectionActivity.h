@@ -106,6 +106,26 @@ class WifiSelectionActivity final : public Activity {
   bool awaitingTimeSync = false;
   unsigned long timeSyncStartMs = 0;
 
+  // Monotonic attempt generation. Every WiFi.begin() takes a new id, and the STA event
+  // counters are snapshotted against it, so a completion can be attributed to the
+  // attempt that actually produced it rather than to whichever attempt is current.
+  uint32_t attemptId = 0;
+  uint32_t gotIpAtAttemptStart = 0;
+  // Association time of the accepted attempt, kept so the total "WiFi ready" figure can
+  // be reported separately from it once the clock sync has also finished.
+  unsigned long associationMs = 0;
+  // How many times onComplete() has run. A duplicate has to be visible, not silent.
+  uint8_t completionCount = 0;
+
+  // Cancellation of a superseded hinted attempt, in flight. The full-scan attempt does
+  // not start until an STA disconnect event has actually been observed (or the bound in
+  // wifi_connect_policy expires), so a fallback never overlaps the attempt it replaces.
+  bool hintCancelPending = false;
+  bool lateCompletionLogged = false;
+  uint32_t cancelledAttemptId = 0;
+  uint32_t disconnectsAtCancel = 0;
+  unsigned long hintCancelStartMs = 0;
+
   void renderNetworkList(const Rect* screen, const ThemeMetrics* metrics) const;
   void renderPasswordEntry(const Rect* screen, const ThemeMetrics* metrics) const;
   void renderConnecting(const Rect* screen, const ThemeMetrics* metrics) const;
@@ -131,6 +151,15 @@ class WifiSelectionActivity final : public Activity {
   // Stores where this connection actually landed, for the next attempt's fast path.
   void rememberConnectionHint();
   void checkConnectionStatus();
+  // Asks a superseded hinted attempt to stop and records the event-counter baseline the
+  // confirmation is measured against.
+  void requestHintCancellation(bool hardFail);
+  // True once an STA disconnect event has been seen since requestHintCancellation(), or
+  // the confirmation bound has expired. Only then may the full-scan attempt be issued.
+  bool hintCancellationConfirmed();
+  // Whether an observed WL_CONNECTED was produced by the attempt currently in flight,
+  // rather than by an earlier one whose GOT_IP predates this attempt's start.
+  bool completionBelongsToActiveAttempt();
   // Completes the activity once the SNTP sync started at association lands or times out.
   void finishWhenClockSynced();
   // Auto-connect helpers: try a saved credential, fall through the scan result for
