@@ -29,6 +29,7 @@
 #if defined(FREEINK_NET_WOLFSSL)
 #include <SecureHttpClient.h>
 
+#include "CoreCaCerts.h"
 #include "HttpUrlParts.h"
 #include "VerifiedTlsSession.h"
 
@@ -141,6 +142,12 @@ void setLastFailure(const HttpDownloader::FailStage stage, const int detail) { g
 // the connection an outer one is still using.
 std::unique_ptr<freeink::SecureHttpClient> gKeepAliveClient;
 int gKeepAliveDepth = 0;
+// The verified session a KeepAliveScope holds open, with the origin it was
+// negotiated for. One handshake per cover-grid page instead of one per cover:
+// the anchors are the same for every Midad Core request, so only the origin has
+// to match for the session to be reusable.
+std::unique_ptr<VerifiedTlsSession> gKeepAliveVerified;
+std::string gKeepAliveVerifiedOrigin;
 #endif
 
 struct Sink {
@@ -554,6 +561,290 @@ HttpDownloader::DownloadError runPostJsonWolf(const std::string& url, const std:
   }
   return HttpDownloader::OK;
 }
+
+// --- Verified GET ---------------------------------------------------------
+//
+// The SDK's SecureHttpClient cannot serve this path. SecureClient::connect()
+// loads a CA when one is set, but never raises WOLFSSL_VERIFY_PEER and never
+// calls wolfSSL_check_domain_name() -- and it exposes no WOLFSSL handle for a
+// caller to add the check on top (VerifiedTlsSession.h states the same). SNI
+// only tells the server which certificate to send; it proves nothing. So every
+// request to a Midad Core host runs here, on a session whose verification
+// cannot be switched off, rather than on setInsecure().
+//
+// Bodies stream straight to the sink. A cover is tens of KB and this device has
+// neither the free heap nor the contiguous block to hold one as a std::string.
+
+bool wolfStreamFixed(VerifiedTlsSession& tls, const size_t count, Sink& sink, uint8_t* buf, const uint32_t timeoutMs) {
+  size_t remaining = count;
+  uint32_t deadline = millis() + timeoutMs;
+  while (remaining > 0) {
+    if (sink.cancelFlag && *sink.cancelFlag) return false;
+    const size_t want = remaining < WOLF_JSON_READ_CHUNK ? remaining : WOLF_JSON_READ_CHUNK;
+    const int got = tls.read(buf, want);
+    if (got < 0) return false;
+    if (got == 0) {
+      if (static_cast<int32_t>(millis() - deadline) >= 0) return false;
+      delay(1);
+      continue;
+    }
+    if (!sink.write(buf, static_cast<size_t>(got))) return false;
+    sink.downloaded += static_cast<size_t>(got);
+    if (sink.progress && sink.total > 0) sink.progress(sink.downloaded, sink.total);
+    remaining -= static_cast<size_t>(got);
+    deadline = millis() + timeoutMs;
+  }
+  return true;
+}
+
+bool wolfStreamUntilClose(VerifiedTlsSession& tls, Sink& sink, uint8_t* buf, const uint32_t timeoutMs) {
+  uint32_t deadline = millis() + timeoutMs;
+  for (;;) {
+    if (sink.cancelFlag && *sink.cancelFlag) return false;
+    const int got = tls.read(buf, WOLF_JSON_READ_CHUNK);
+    if (got < 0) return true;  // clean end of stream: the close IS the terminator
+    if (got == 0) {
+      if (!tls.connected()) return true;
+      if (static_cast<int32_t>(millis() - deadline) >= 0) return false;
+      delay(1);
+      continue;
+    }
+    if (!sink.write(buf, static_cast<size_t>(got))) return false;
+    sink.downloaded += static_cast<size_t>(got);
+    if (sink.progress && sink.total > 0) sink.progress(sink.downloaded, sink.total);
+    deadline = millis() + timeoutMs;
+  }
+}
+
+bool wolfStreamChunked(VerifiedTlsSession& tls, Sink& sink, uint8_t* buf, const uint32_t timeoutMs) {
+  std::string line;
+  for (;;) {
+    if (!wolfReadLine(tls, line, timeoutMs)) return false;
+    if (line.empty()) continue;  // trailing CRLF of the previous chunk
+    const size_t size = static_cast<size_t>(strtoul(line.c_str(), nullptr, 16));
+    if (size == 0) return true;  // last chunk; trailers are not read back
+    if (!wolfStreamFixed(tls, size, sink, buf, timeoutMs)) return false;
+    if (!wolfReadLine(tls, line, timeoutMs)) return false;  // chunk terminator
+  }
+}
+
+HttpDownloader::DownloadError runGetVerified(const std::string& startUrl, const std::string& username,
+                                             const std::string& password, Sink& sink, const char* anchorsPem) {
+  setLastFailure(HttpDownloader::FailStage::NONE, 0);
+  WifiPowerSaveGuard psGuard;
+
+  if (!anchorsPem || !*anchorsPem) {
+    LOG_ERR("HTTP", "verified GET called without trust anchors");
+    setLastFailure(HttpDownloader::FailStage::OPEN, 0);
+    return HttpDownloader::HTTP_ERROR;
+  }
+  // Hop 0 gets the same admission check every redirect target gets: a cover href
+  // arrives absolute out of the feed, so a userinfo authority can reach here with
+  // no redirect involved at all.
+  const RedirectVerdict startVerdict = checkRequestUrl(startUrl);
+  if (startVerdict != RedirectVerdict::Follow) {
+    LOG_ERR("HTTP", "verified GET refusing request URL: %s", describeRedirectVerdict(startVerdict));
+    setLastFailure(HttpDownloader::FailStage::OPEN, 0);
+    return HttpDownloader::HTTP_ERROR;
+  }
+
+  auto buf = makeUniqueNoThrow<uint8_t[]>(WOLF_JSON_READ_CHUNK);
+  if (!buf) {
+    LOG_ERR("HTTP", "OOM: %u byte read buffer (free heap: %u bytes)", (unsigned)WOLF_JSON_READ_CHUNK,
+            ESP.getFreeHeap());
+    setLastFailure(HttpDownloader::FailStage::BUFFER_OOM, static_cast<int>(ESP.getFreeHeap()));
+    return HttpDownloader::HTTP_ERROR;
+  }
+
+  std::string url = startUrl;
+  RedirectOriginGuard originGuard(startUrl);
+  const uint32_t timeoutMs = static_cast<uint32_t>(HTTP_TIMEOUT_MS);
+
+  for (int hop = 0; hop <= MAX_REDIRECTS; ++hop) {
+    HttpUrlParts parts;
+    if (!parseHttpUrl(url, parts)) {
+      LOG_ERR("HTTP", "verified GET: unparseable URL");
+      setLastFailure(HttpDownloader::FailStage::OPEN, 0);
+      return HttpDownloader::HTTP_ERROR;
+    }
+    // There is no plaintext way out of this function. An https -> http redirect
+    // is refused by checkRedirectTarget below, and a caller asking for pinned
+    // verification over http:// has asked for something undeliverable.
+    if (!parts.https) {
+      LOG_ERR("HTTP", "verified GET refuses a non-https URL");
+      setLastFailure(HttpDownloader::FailStage::OPEN, 0);
+      return HttpDownloader::HTTP_ERROR;
+    }
+
+    const std::string origin = parts.host + ":" + std::to_string(parts.port);
+    const bool keepAlive = gKeepAliveDepth > 0;
+
+    // Reuse the held session only for the same origin. A different origin gets a
+    // fresh handshake -- a TLS session is never carried across origins.
+    VerifiedTlsSession* tls = nullptr;
+    std::unique_ptr<VerifiedTlsSession> owned;
+    if (keepAlive && gKeepAliveVerified && gKeepAliveVerifiedOrigin == origin && gKeepAliveVerified->connected()) {
+      tls = gKeepAliveVerified.get();
+    } else {
+      owned = makeUniqueNoThrow<VerifiedTlsSession>();
+      if (!owned) {
+        LOG_ERR("HTTP", "verified session alloc failed (free heap: %u bytes)",
+                static_cast<unsigned>(ESP.getFreeHeap()));
+        setLastFailure(HttpDownloader::FailStage::CLIENT_INIT, static_cast<int>(ESP.getFreeHeap()));
+        return HttpDownloader::HTTP_ERROR;
+      }
+      if (!owned->connect(parts.host.c_str(), parts.port, anchorsPem, timeoutMs)) {
+        LOG_ERR("HTTP", "verified handshake failed: %d (free heap: %u bytes)", owned->lastError(),
+                static_cast<unsigned>(ESP.getFreeHeap()));
+        setLastFailure(HttpDownloader::FailStage::OPEN, owned->lastError());
+        return HttpDownloader::HTTP_ERROR;
+      }
+      if (keepAlive) {
+        gKeepAliveVerified = std::move(owned);
+        gKeepAliveVerifiedOrigin = origin;
+        tls = gKeepAliveVerified.get();
+      } else {
+        tls = owned.get();
+      }
+    }
+
+    std::string request;
+    request.reserve(320);
+    request += "GET " + parts.path + " HTTP/1.1\r\n";
+    request += "Host: " + parts.host;
+    if (parts.port != 443) request += ":" + std::to_string(parts.port);
+    request += "\r\n";
+    request += "User-Agent: CrossPoint-ESP32-" CROSSPOINT_VERSION "\r\n";
+    // Credentials follow the same rule as every other path: never written once the
+    // chain has left the origin they were issued for.
+    if (originGuard.credentialsAllowed() && !username.empty() && !password.empty()) {
+      request +=
+          "Authorization: Basic " + std::string(base64::encode((username + ":" + password).c_str()).c_str()) + "\r\n";
+      if (isFouladEbooksUrl(url)) {
+        const std::string serial = FouladDeviceTracking::getSerialNumber();
+        if (!serial.empty()) request += "X-Device-Serial: " + serial + "\r\n";
+      }
+    }
+    request += keepAlive ? "Connection: keep-alive\r\n\r\n" : "Connection: close\r\n\r\n";
+
+    if (tls->write(reinterpret_cast<const uint8_t*>(request.data()), request.size()) < 0) {
+      LOG_ERR("HTTP", "verified GET write failed");
+      setLastFailure(HttpDownloader::FailStage::OPEN, tls->lastError());
+      if (keepAlive) gKeepAliveVerified.reset();
+      return HttpDownloader::HTTP_ERROR;
+    }
+    request.clear();
+    request.shrink_to_fit();
+
+    std::string line;
+    if (!wolfReadLine(*tls, line, timeoutMs) || line.size() < 12) {
+      LOG_ERR("HTTP", "verified GET: no status line");
+      setLastFailure(HttpDownloader::FailStage::READ, 0);
+      if (keepAlive) gKeepAliveVerified.reset();
+      return HttpDownloader::HTTP_ERROR;
+    }
+    const int status = atoi(line.c_str() + 9);
+
+    std::string location;
+    size_t contentLength = 0;
+    bool haveContentLength = false;
+    bool chunked = false;
+    bool serverCloses = false;
+    while (wolfReadLine(*tls, line, timeoutMs)) {
+      if (line.empty()) break;
+      const size_t colon = line.find(':');
+      if (colon == std::string::npos) continue;
+      const std::string name = line.substr(0, colon);
+      std::string value = line.substr(colon + 1);
+      while (!value.empty() && value.front() == ' ') value.erase(value.begin());
+      if (strcasecmp(name.c_str(), "content-length") == 0) {
+        contentLength = static_cast<size_t>(strtoul(value.c_str(), nullptr, 10));
+        haveContentLength = true;
+      } else if (strcasecmp(name.c_str(), "location") == 0) {
+        location = value;
+      } else if (strcasecmp(name.c_str(), "transfer-encoding") == 0) {
+        std::transform(value.begin(), value.end(), value.begin(),
+                       [](unsigned char c) { return static_cast<char>(tolower(c)); });
+        chunked = value.find("chunked") != std::string::npos;
+      } else if (strcasecmp(name.c_str(), "connection") == 0) {
+        std::transform(value.begin(), value.end(), value.begin(),
+                       [](unsigned char c) { return static_cast<char>(tolower(c)); });
+        serverCloses = value.find("close") != std::string::npos;
+      }
+    }
+
+    if (isRedirect(status)) {
+      if (location.empty()) {
+        LOG_ERR("HTTP", "verified GET: %d with no Location", status);
+        setLastFailure(HttpDownloader::FailStage::REDIRECT, status);
+        return HttpDownloader::HTTP_ERROR;
+      }
+      const RedirectVerdict locationVerdict = checkRedirectLocation(location);
+      if (locationVerdict != RedirectVerdict::Follow) {
+        LOG_ERR("HTTP", "verified GET refusing redirect (%d): %s", status, describeRedirectVerdict(locationVerdict));
+        setLastFailure(HttpDownloader::FailStage::REDIRECT, status);
+        return HttpDownloader::HTTP_ERROR;
+      }
+      std::string resolved;
+      if (!freeink::SecureHttpClient::resolveUrl(url, location, resolved)) {
+        LOG_ERR("HTTP", "verified GET: bad redirect target (%d)", status);
+        setLastFailure(HttpDownloader::FailStage::REDIRECT, status);
+        return HttpDownloader::HTTP_ERROR;
+      }
+      const RedirectVerdict targetVerdict = checkRedirectTarget(url, resolved);
+      if (targetVerdict != RedirectVerdict::Follow) {
+        LOG_ERR("HTTP", "verified GET refusing redirect (%d): %s", status, describeRedirectVerdict(targetVerdict));
+        setLastFailure(HttpDownloader::FailStage::REDIRECT, status);
+        return HttpDownloader::HTTP_ERROR;
+      }
+      // Drain the redirect body so a kept-alive connection stays in sync.
+      if (haveContentLength && contentLength > 0) {
+        Sink discard;
+        discard.write = [](const uint8_t*, size_t) { return true; };
+        wolfStreamFixed(*tls, contentLength, discard, buf.get(), timeoutMs);
+      } else if (chunked) {
+        Sink discard;
+        discard.write = [](const uint8_t*, size_t) { return true; };
+        wolfStreamChunked(*tls, discard, buf.get(), timeoutMs);
+      } else if (keepAlive) {
+        gKeepAliveVerified.reset();  // body length unknown: the session cannot be reused
+      }
+      url = std::move(resolved);
+      originGuard.onHop(url);
+      continue;
+    }
+
+    if (status != 200) {
+      LOG_DBG("HTTP", "verified GET non-200 status: %d", status);
+      setLastFailure(HttpDownloader::FailStage::STATUS, status);
+      if (keepAlive && !haveContentLength && !chunked) gKeepAliveVerified.reset();
+      return HttpDownloader::HTTP_ERROR;
+    }
+
+    if (haveContentLength) sink.total = contentLength;
+    bool ok;
+    if (chunked) {
+      ok = wolfStreamChunked(*tls, sink, buf.get(), timeoutMs);
+    } else if (haveContentLength) {
+      ok = wolfStreamFixed(*tls, contentLength, sink, buf.get(), timeoutMs);
+    } else {
+      ok = wolfStreamUntilClose(*tls, sink, buf.get(), timeoutMs);
+      serverCloses = true;
+    }
+    if (!ok) {
+      setLastFailure(HttpDownloader::FailStage::READ, 0);
+      if (keepAlive) gKeepAliveVerified.reset();
+      return HttpDownloader::HTTP_ERROR;
+    }
+    if (keepAlive && serverCloses) gKeepAliveVerified.reset();
+    return HttpDownloader::OK;
+  }
+
+  LOG_ERR("HTTP", "verified GET: too many redirects");
+  setLastFailure(HttpDownloader::FailStage::REDIRECT, MAX_REDIRECTS);
+  return HttpDownloader::HTTP_ERROR;
+}
+
 #endif  // FREEINK_NET_WOLFSSL
 
 // Streams a GET body through sink.write in READ_CHUNK pieces. Uses the manual
@@ -1246,6 +1537,13 @@ HttpDownloader::DownloadError runPostJson(const std::string& url, const std::str
 HttpDownloader::DownloadError runGetSecure(const std::string& url, const std::string& username,
                                            const std::string& password, Sink& sink) {
 #if defined(FREEINK_NET_WOLFSSL)
+  // Every Midad Core request -- feed, cover, download -- runs verified, anchored
+  // at GTS Root R4. Host-gated, not path-gated: covers live outside /opds
+  // (/library/items/:id/cover, /store/books/:id/cover) and must not fall through
+  // to the unverified path because of their path prefix.
+  if (isFouladEbooksUrl(url)) {
+    return runGetVerified(url, username, password, sink, core_ca::kMidadCoreCaGtsRootR4);
+  }
   return runGetWolf(url, username, password, sink);
 #else
   return runGet(url, username, password, sink);
@@ -1258,6 +1556,7 @@ HttpDownloader::LastFailure HttpDownloader::getLastFailure() { return gLastFailu
 HttpDownloader::KeepAliveScope::KeepAliveScope() {
 #if defined(FREEINK_NET_WOLFSSL)
   if (gKeepAliveDepth++ > 0) return;  // an inner scope rides the outer one's client
+  gKeepAliveVerifiedOrigin.clear();
   gKeepAliveClient = makeUniqueNoThrow<freeink::SecureHttpClient>();
   if (!gKeepAliveClient) {
     // Not an error the caller has to handle: with no shared client every request
@@ -1272,6 +1571,8 @@ HttpDownloader::KeepAliveScope::~KeepAliveScope() {
 #if defined(FREEINK_NET_WOLFSSL)
   if (--gKeepAliveDepth > 0) return;
   gKeepAliveClient.reset();  // closes the socket and frees the TLS session
+  gKeepAliveVerified.reset();
+  gKeepAliveVerifiedOrigin.clear();
 #endif
 }
 
