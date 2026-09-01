@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <set>
 #include <string>
 #include <vector>
 
@@ -196,4 +197,135 @@ TEST(RedirectOriginGuard, LeftStartOriginTracksTheLatch) {
   EXPECT_TRUE(guard.leftStartOrigin());
   guard.onHop("https://api.midad.one/d");
   EXPECT_TRUE(guard.leftStartOrigin());
+}
+
+// --- redirect admission control ----------------------------------------------
+//
+// Every case here is a shape runGetWolf() must REFUSE outright rather than follow
+// with credentials stripped. Following a refused redirect would still fetch the
+// body over whatever transport the server named, which for a downgrade means
+// cleartext.
+
+TEST(RedirectAdmission, PlainRelativeLocationIsFollowed) {
+  EXPECT_EQ(checkRedirectLocation("/opds/v2/root.xml"), RedirectVerdict::Follow);
+  EXPECT_EQ(checkRedirectLocation("cover-2.jpg"), RedirectVerdict::Follow);
+  EXPECT_EQ(checkRedirectLocation("?sig=abc"), RedirectVerdict::Follow);
+}
+
+TEST(RedirectAdmission, AbsoluteHttpAndHttpsLocationsAreFollowed) {
+  EXPECT_EQ(checkRedirectLocation("https://cdn.midad.one/covers/1.jpg"), RedirectVerdict::Follow);
+  EXPECT_EQ(checkRedirectLocation("http://192.168.1.50:8080/opds/root.xml"), RedirectVerdict::Follow);
+  // Scheme comparison is case-insensitive (RFC 3986 3.1).
+  EXPECT_EQ(checkRedirectLocation("HTTPS://cdn.midad.one/covers/1.jpg"), RedirectVerdict::Follow);
+}
+
+TEST(RedirectAdmission, EmptyOrWhitespaceLocationIsRejected) {
+  EXPECT_EQ(checkRedirectLocation(""), RedirectVerdict::RejectEmptyLocation);
+  EXPECT_EQ(checkRedirectLocation("   "), RedirectVerdict::RejectEmptyLocation);
+  EXPECT_EQ(checkRedirectLocation("\r\n\t "), RedirectVerdict::RejectEmptyLocation);
+}
+
+TEST(RedirectAdmission, ProtocolRelativeLocationIsRejected) {
+  // RFC 3986 says "//evil.example/x" is a network-path reference inheriting the
+  // scheme; SecureHttpClient::resolveUrl treats it as a path under the current
+  // host. Rejecting removes the dependency on which reading applies.
+  EXPECT_EQ(checkRedirectLocation("//evil.example/covers/1.jpg"), RedirectVerdict::RejectProtocolRelative);
+  EXPECT_EQ(checkRedirectLocation("  //evil.example/x"), RedirectVerdict::RejectProtocolRelative);
+}
+
+TEST(RedirectAdmission, NonHttpSchemesAreRejected) {
+  EXPECT_EQ(checkRedirectLocation("file:///etc/passwd"), RedirectVerdict::RejectUnsupportedScheme);
+  EXPECT_EQ(checkRedirectLocation("data:text/html,<script>x</script>"), RedirectVerdict::RejectUnsupportedScheme);
+  EXPECT_EQ(checkRedirectLocation("javascript:alert(1)"), RedirectVerdict::RejectUnsupportedScheme);
+  EXPECT_EQ(checkRedirectLocation("mailto:someone@example.com"), RedirectVerdict::RejectUnsupportedScheme);
+  EXPECT_EQ(checkRedirectLocation("ftp://files.example/x"), RedirectVerdict::RejectUnsupportedScheme);
+}
+
+TEST(RedirectAdmission, HttpSchemeWithoutAnAuthorityIsRejected) {
+  // "http:/host/x" and "https:x" are not shapes a real server sends, and
+  // resolveUrl() would mangle both into a path under the current origin.
+  EXPECT_EQ(checkRedirectLocation("http:/evil.example/x"), RedirectVerdict::RejectUnsupportedScheme);
+  EXPECT_EQ(checkRedirectLocation("https:cover.jpg"), RedirectVerdict::RejectUnsupportedScheme);
+}
+
+TEST(RedirectAdmission, UserinfoInAnAbsoluteLocationIsRejected) {
+  // The shape this project has already been bitten by: reads as api.midad.one,
+  // resolves to evil.example. See test/foulad_core_endpoints for the other half.
+  EXPECT_EQ(checkRedirectLocation("https://api.midad.one@evil.example/opds"), RedirectVerdict::RejectUserinfo);
+  EXPECT_EQ(checkRedirectLocation("https://user:pass@evil.example/covers/1.jpg"), RedirectVerdict::RejectUserinfo);
+  EXPECT_EQ(checkRedirectLocation("https://api.midad.one@evil.example:443/opds"), RedirectVerdict::RejectUserinfo);
+}
+
+TEST(RedirectAdmission, UserinfoIsRejectedOnTheInitialRequestUrlToo) {
+  // Cover hrefs arrive absolute from the feed, so this shape can reach the
+  // downloader with no redirect involved at all.
+  EXPECT_EQ(checkRequestUrl("https://api.midad.one@evil.example/cover.jpg"), RedirectVerdict::RejectUserinfo);
+  EXPECT_EQ(checkRequestUrl("https://api.midad.one/cover.jpg"), RedirectVerdict::Follow);
+}
+
+TEST(RedirectAdmission, AnAtSignInThePathIsNotUserinfo) {
+  // '@' is legal in a path or query; only the authority matters.
+  EXPECT_EQ(checkRequestUrl("https://api.midad.one/opds/user@example/1.jpg"), RedirectVerdict::Follow);
+  EXPECT_EQ(checkRequestUrl("https://api.midad.one/opds?to=user@example"), RedirectVerdict::Follow);
+}
+
+TEST(RedirectAdmission, MissingAuthorityIsRejected) {
+  EXPECT_EQ(checkRequestUrl("https:///opds/root.xml"), RedirectVerdict::RejectUnsupportedScheme);
+  EXPECT_EQ(checkRequestUrl("not-a-url"), RedirectVerdict::RejectUnsupportedScheme);
+}
+
+TEST(RedirectAdmission, HttpsToHttpDowngradeIsRejected) {
+  EXPECT_EQ(checkRedirectTarget("https://api.midad.one/cover.jpg", "http://api.midad.one/cover.jpg"),
+            RedirectVerdict::RejectDowngrade);
+  // Cross-origin downgrade is refused for the same reason, not merely stripped.
+  EXPECT_EQ(checkRedirectTarget("https://api.midad.one/cover.jpg", "http://evil.example/cover.jpg"),
+            RedirectVerdict::RejectDowngrade);
+  // Case-insensitive on both sides.
+  EXPECT_EQ(checkRedirectTarget("HTTPS://api.midad.one/a", "HTTP://api.midad.one/a"), RedirectVerdict::RejectDowngrade);
+}
+
+TEST(RedirectAdmission, HttpToHttpChainIsAllowed) {
+  // A plain-HTTP server was never confidential, so there is nothing to strip --
+  // refusing it would break local/self-hosted OPDS and FOULAD_EBOOKS_NEWS_URL.
+  EXPECT_EQ(checkRedirectTarget("http://192.168.1.50:8080/opds", "http://192.168.1.50:8080/opds/v2"),
+            RedirectVerdict::Follow);
+  EXPECT_EQ(checkRedirectTarget("http://foulad.one/opds", "http://midad.one/opds"), RedirectVerdict::Follow);
+}
+
+TEST(RedirectAdmission, HttpToHttpsUpgradeIsAllowed) {
+  EXPECT_EQ(checkRedirectTarget("http://midad.one/opds", "https://api.midad.one/opds"), RedirectVerdict::Follow);
+}
+
+TEST(RedirectAdmission, HttpsToHttpsIsAllowedAcrossOrigins) {
+  // Allowed to FOLLOW; RedirectOriginGuard is what strips credentials for it.
+  EXPECT_EQ(checkRedirectTarget("https://api.midad.one/cover.jpg", "https://pub-example.r2.dev/1.jpg"),
+            RedirectVerdict::Follow);
+}
+
+TEST(RedirectAdmission, UserinfoIsCheckedBeforeTheDowngradeRule) {
+  // A target that is both malformed and a downgrade reports the malformation;
+  // either way it is refused, this just pins the reported reason.
+  EXPECT_EQ(checkRedirectTarget("https://api.midad.one/a", "http://api.midad.one@evil.example/a"),
+            RedirectVerdict::RejectUserinfo);
+}
+
+TEST(RedirectAdmission, EveryVerdictHasADistinctDescription) {
+  // The rejection reason is all that gets logged (never the URL), so it has to
+  // actually distinguish the cases.
+  const std::vector<RedirectVerdict> all = {
+      RedirectVerdict::Follow,
+      RedirectVerdict::RejectEmptyLocation,
+      RedirectVerdict::RejectProtocolRelative,
+      RedirectVerdict::RejectUnsupportedScheme,
+      RedirectVerdict::RejectUserinfo,
+      RedirectVerdict::RejectDowngrade,
+  };
+  std::set<std::string> descriptions;
+  for (const RedirectVerdict verdict : all) {
+    const char* text = describeRedirectVerdict(verdict);
+    ASSERT_NE(text, nullptr);
+    EXPECT_STRNE(text, "unknown");
+    descriptions.insert(text);
+  }
+  EXPECT_EQ(descriptions.size(), all.size());
 }

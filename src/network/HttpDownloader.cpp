@@ -204,6 +204,19 @@ HttpDownloader::DownloadError runGetWolf(const std::string& startUrl, const std:
     http = owned.get();
   }
 
+  // Hop 0 gets the same admission check every redirect target gets. A cover or
+  // acquisition href arrives absolute, straight out of the feed (OpdsParser.cpp),
+  // so "https://api.midad.one@evil.example/cover.jpg" can reach here without any
+  // redirect being involved at all.
+  const RedirectVerdict startVerdict = checkRequestUrl(startUrl);
+  if (startVerdict != RedirectVerdict::Follow) {
+    // Deliberately does not log the URL: this is the one case where it may carry
+    // credentials in its authority.
+    LOG_ERR("HTTP", "wolfSSL refusing request URL: %s", describeRedirectVerdict(startVerdict));
+    setLastFailure(HttpDownloader::FailStage::OPEN, 0);
+    return HttpDownloader::HTTP_ERROR;
+  }
+
   std::string url = startUrl;
   // Views startUrl, which outlives this loop -- deliberately not `url`, which is
   // rewritten on every redirect. See RedirectOriginGuard for the rule itself.
@@ -263,12 +276,33 @@ HttpDownloader::DownloadError runGetWolf(const std::string& startUrl, const std:
       return HttpDownloader::HTTP_ERROR;
     }
     if (isRedirect(status)) {
+      // Every rejection below is a hard stop, never a "follow it anyway without
+      // credentials": a redirect this device refuses to trust is a server that
+      // should not be getting the request either. None of them log the URL --
+      // a rejected Location is exactly the one that may carry credentials.
       const std::string location = http->getHeader("location");
-      if (location.empty() || !freeink::SecureHttpClient::resolveUrl(url, location, url)) {
+      const RedirectVerdict locationVerdict = checkRedirectLocation(location);
+      if (locationVerdict != RedirectVerdict::Follow) {
+        LOG_ERR("HTTP", "wolfSSL refusing redirect (%d): %s", status, describeRedirectVerdict(locationVerdict));
+        setLastFailure(HttpDownloader::FailStage::REDIRECT, status);
+        return HttpDownloader::HTTP_ERROR;
+      }
+      // Resolved into its own string, not over `url`: `url` is still needed as the
+      // previous hop for the downgrade check, and nothing should advance to a
+      // target that has not passed it.
+      std::string next;
+      if (!freeink::SecureHttpClient::resolveUrl(url, location, next)) {
         LOG_ERR("HTTP", "wolfSSL bad redirect: %d", status);
         setLastFailure(HttpDownloader::FailStage::REDIRECT, status);
         return HttpDownloader::HTTP_ERROR;
       }
+      const RedirectVerdict targetVerdict = checkRedirectTarget(url, next);
+      if (targetVerdict != RedirectVerdict::Follow) {
+        LOG_ERR("HTTP", "wolfSSL refusing redirect (%d): %s", status, describeRedirectVerdict(targetVerdict));
+        setLastFailure(HttpDownloader::FailStage::REDIRECT, status);
+        return HttpDownloader::HTTP_ERROR;
+      }
+      url = std::move(next);
       originGuard.onHop(url);
       continue;
     }
