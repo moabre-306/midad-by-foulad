@@ -54,6 +54,10 @@ class VerifiedTlsSession {
   int read(uint8_t* data, size_t len);
   bool connected();
   void stop();
+  // True once a fatal wolfSSL error has torn this session down. A poisoned
+  // session is never usable again and must never be reused by a keep-alive
+  // holder -- reusing one is what crashed a real device.
+  bool poisoned() const { return poisoned_; }
 
   int lastError() const { return lastError_; }
 
@@ -62,7 +66,11 @@ class VerifiedTlsSession {
   void* ssl_ = nullptr;  // WOLFSSL*, opaque to keep wolfSSL headers out of here
   void* ctx_ = nullptr;  // WOLFSSL_CTX*
   bool connected_ = false;
+  bool poisoned_ = false;
   int lastError_ = 0;
+
+  // Tears the session down on a fatal wolfSSL error, transport first.
+  void failFatally(int err);
 };
 
 #endif  // FREEINK_NET_WOLFSSL

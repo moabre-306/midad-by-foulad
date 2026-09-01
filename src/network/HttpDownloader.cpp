@@ -148,6 +148,16 @@ int gKeepAliveDepth = 0;
 // to match for the session to be reusable.
 std::unique_ptr<VerifiedTlsSession> gKeepAliveVerified;
 std::string gKeepAliveVerifiedOrigin;
+// Below this contiguous block a held session is dropped rather than reused. A
+// kept connection is an optimisation; carrying one through a heap this tight is
+// how a cover grid ends up doing TLS work with nothing left to recover with.
+constexpr uint32_t KEEPALIVE_MIN_CONTIGUOUS_BYTES = 8192;
+
+// Drops any held session. Safe to call when none is held.
+void dropKeepAliveVerified() {
+  gKeepAliveVerified.reset();
+  gKeepAliveVerifiedOrigin.clear();
+}
 #endif
 
 struct Sink {
@@ -659,6 +669,9 @@ HttpDownloader::DownloadError runGetVerified(const std::string& startUrl, const 
   std::string url = startUrl;
   RedirectOriginGuard originGuard(startUrl);
   const uint32_t timeoutMs = static_cast<uint32_t>(HTTP_TIMEOUT_MS);
+  // The hop a reused session has already been retried on, so one stale keep-alive
+  // costs one extra handshake and never loops.
+  int retriedHop = -1;
 
   for (int hop = 0; hop <= MAX_REDIRECTS; ++hop) {
     HttpUrlParts parts;
@@ -683,9 +696,16 @@ HttpDownloader::DownloadError runGetVerified(const std::string& startUrl, const 
     // fresh handshake -- a TLS session is never carried across origins.
     VerifiedTlsSession* tls = nullptr;
     std::unique_ptr<VerifiedTlsSession> owned;
-    if (keepAlive && gKeepAliveVerified && gKeepAliveVerifiedOrigin == origin && gKeepAliveVerified->connected()) {
+    bool reusedSession = false;
+    // A held session is reusable only when it is for this exact origin, has
+    // never taken a fatal error, is still connected, AND the heap can still
+    // afford the fresh handshake a failed reuse would need.
+    if (keepAlive && gKeepAliveVerified && gKeepAliveVerifiedOrigin == origin && !gKeepAliveVerified->poisoned() &&
+        gKeepAliveVerified->connected() && ESP.getMaxAllocHeap() >= KEEPALIVE_MIN_CONTIGUOUS_BYTES) {
       tls = gKeepAliveVerified.get();
+      reusedSession = true;
     } else {
+      if (keepAlive) dropKeepAliveVerified();
       owned = makeUniqueNoThrow<VerifiedTlsSession>();
       if (!owned) {
         LOG_ERR("HTTP", "verified session alloc failed (free heap: %u bytes)",
@@ -728,9 +748,19 @@ HttpDownloader::DownloadError runGetVerified(const std::string& startUrl, const 
     request += keepAlive ? "Connection: keep-alive\r\n\r\n" : "Connection: close\r\n\r\n";
 
     if (tls->write(reinterpret_cast<const uint8_t*>(request.data()), request.size()) < 0) {
+      // A held connection the server closed while idle fails here, on a socket
+      // that looked alive. That is not a request failure, so a REUSED session
+      // gets one fresh handshake before the request is given up on. A session
+      // this function opened itself has no such excuse.
+      if (reusedSession && retriedHop != hop) {
+        retriedHop = hop;
+        dropKeepAliveVerified();
+        --hop;
+        continue;
+      }
       LOG_ERR("HTTP", "verified GET write failed");
       setLastFailure(HttpDownloader::FailStage::OPEN, tls->lastError());
-      if (keepAlive) gKeepAliveVerified.reset();
+      if (keepAlive) dropKeepAliveVerified();
       return HttpDownloader::HTTP_ERROR;
     }
     request.clear();
@@ -738,9 +768,18 @@ HttpDownloader::DownloadError runGetVerified(const std::string& startUrl, const 
 
     std::string line;
     if (!wolfReadLine(*tls, line, timeoutMs) || line.size() < 12) {
+      // Same one-shot retry as the write above: a closed keep-alive connection
+      // most often surfaces here, with the request written into a dead socket
+      // and no status line coming back.
+      if (reusedSession && retriedHop != hop) {
+        retriedHop = hop;
+        dropKeepAliveVerified();
+        --hop;
+        continue;
+      }
       LOG_ERR("HTTP", "verified GET: no status line");
       setLastFailure(HttpDownloader::FailStage::READ, 0);
-      if (keepAlive) gKeepAliveVerified.reset();
+      if (keepAlive) dropKeepAliveVerified();
       return HttpDownloader::HTTP_ERROR;
     }
     const int status = atoi(line.c_str() + 9);
@@ -807,7 +846,7 @@ HttpDownloader::DownloadError runGetVerified(const std::string& startUrl, const 
         discard.write = [](const uint8_t*, size_t) { return true; };
         wolfStreamChunked(*tls, discard, buf.get(), timeoutMs);
       } else if (keepAlive) {
-        gKeepAliveVerified.reset();  // body length unknown: the session cannot be reused
+        dropKeepAliveVerified();  // body length unknown: the session cannot be reused
       }
       url = std::move(resolved);
       originGuard.onHop(url);
@@ -817,7 +856,7 @@ HttpDownloader::DownloadError runGetVerified(const std::string& startUrl, const 
     if (status != 200) {
       LOG_DBG("HTTP", "verified GET non-200 status: %d", status);
       setLastFailure(HttpDownloader::FailStage::STATUS, status);
-      if (keepAlive && !haveContentLength && !chunked) gKeepAliveVerified.reset();
+      if (keepAlive && !haveContentLength && !chunked) dropKeepAliveVerified();
       return HttpDownloader::HTTP_ERROR;
     }
 
@@ -833,10 +872,10 @@ HttpDownloader::DownloadError runGetVerified(const std::string& startUrl, const 
     }
     if (!ok) {
       setLastFailure(HttpDownloader::FailStage::READ, 0);
-      if (keepAlive) gKeepAliveVerified.reset();
+      if (keepAlive) dropKeepAliveVerified();
       return HttpDownloader::HTTP_ERROR;
     }
-    if (keepAlive && serverCloses) gKeepAliveVerified.reset();
+    if (keepAlive && serverCloses) dropKeepAliveVerified();
     return HttpDownloader::OK;
   }
 

@@ -15,6 +15,11 @@ namespace {
 // handshake loop below retries on WANT_READ/WANT_WRITE rather than blocking a
 // task for the whole round trip.
 int sessionSend(WOLFSSL* /*ssl*/, char* buf, int sz, void* ctx) {
+  // wolfSSL can call back into the BIO during teardown (close_notify on
+  // wolfSSL_free). If the session has already been poisoned by a fatal error its
+  // transport is stopped first, so report the connection closed rather than
+  // writing through a socket nothing owns any more.
+  if (!ctx || !buf || sz <= 0) return WOLFSSL_CBIO_ERR_CONN_CLOSE;
   auto* transport = static_cast<WiFiClient*>(ctx);
   const int written = transport->write(reinterpret_cast<const uint8_t*>(buf), static_cast<size_t>(sz));
   if (written <= 0) {
@@ -27,6 +32,7 @@ int sessionSend(WOLFSSL* /*ssl*/, char* buf, int sz, void* ctx) {
 }
 
 int sessionRecv(WOLFSSL* /*ssl*/, char* buf, int sz, void* ctx) {
+  if (!ctx || !buf || sz <= 0) return WOLFSSL_CBIO_ERR_CONN_CLOSE;
   auto* transport = static_cast<WiFiClient*>(ctx);
   if (!transport->connected() && transport->available() == 0) return WOLFSSL_CBIO_ERR_CONN_CLOSE;
   if (transport->available() == 0) return WOLFSSL_CBIO_ERR_WANT_READ;
@@ -167,8 +173,30 @@ bool VerifiedTlsSession::connect(const char* host, const uint16_t port, const ch
   return true;
 }
 
+void VerifiedTlsSession::failFatally(const int err) {
+  lastError_ = err;
+  poisoned_ = true;
+  connected_ = false;
+  // Transport first, deliberately. After a wolfCrypt failure -- MEMORY_E from a
+  // refused allocation, or AES_GCM_AUTH_E from a record that failed its tag --
+  // wolfSSL's own state is no longer trustworthy, and wolfSSL_free() may try to
+  // emit a close_notify through the BIO on the way out. Stopping the socket
+  // first makes that write a no-op (sessionSend reports CONN_CLOSE) instead of a
+  // send driven by corrupted internals. A real device took a Load access fault
+  // inside sessionSend exactly this way, after MEMORY_E then AES_GCM_AUTH_E.
+  transport_.stop();
+  if (ssl_) {
+    wolfSSL_free(static_cast<WOLFSSL*>(ssl_));
+    ssl_ = nullptr;
+  }
+  if (ctx_) {
+    wolfSSL_CTX_free(static_cast<WOLFSSL_CTX*>(ctx_));
+    ctx_ = nullptr;
+  }
+}
+
 int VerifiedTlsSession::write(const uint8_t* data, const size_t len) {
-  if (!connected_ || !data) return -1;
+  if (!connected_ || poisoned_ || !ssl_ || !data) return -1;
   auto* ssl = static_cast<WOLFSSL*>(ssl_);
   size_t off = 0;
   while (off < len) {
@@ -183,15 +211,14 @@ int VerifiedTlsSession::write(const uint8_t* data, const size_t len) {
       continue;
     }
     LOG_ERR("VTLS", "write failed: %d", err);
-    lastError_ = err;
-    connected_ = false;
+    failFatally(err);
     return -1;
   }
   return static_cast<int>(len);
 }
 
 int VerifiedTlsSession::read(uint8_t* data, const size_t len) {
-  if (!connected_ || !data) return -1;
+  if (!connected_ || poisoned_ || !ssl_ || !data) return -1;
   auto* ssl = static_cast<WOLFSSL*>(ssl_);
   const int got = wolfSSL_read(ssl, data, static_cast<int>(len));
   if (got > 0) return got;
@@ -203,12 +230,11 @@ int VerifiedTlsSession::read(uint8_t* data, const size_t len) {
     return -1;
   }
   LOG_ERR("VTLS", "read failed: %d (free heap: %u bytes)", err, static_cast<unsigned>(ESP.getFreeHeap()));
-  lastError_ = err;
-  connected_ = false;
+  failFatally(err);
   return -1;
 }
 
-bool VerifiedTlsSession::connected() { return connected_ && transport_.connected(); }
+bool VerifiedTlsSession::connected() { return connected_ && !poisoned_ && ssl_ && transport_.connected(); }
 
 void VerifiedTlsSession::stop() {
   if (ssl_) {
