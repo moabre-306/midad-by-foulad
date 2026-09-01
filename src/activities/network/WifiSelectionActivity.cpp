@@ -8,9 +8,11 @@
 #include <WiFi.h>
 
 #include <algorithm>
+#include <cstring>
 
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
+#include "WifiConnectionHintStore.h"
 #include "WifiCredentialStore.h"
 #include "activities/util/KeyboardEntryActivity.h"
 #include "components/UITheme.h"
@@ -25,6 +27,7 @@ void WifiSelectionActivity::onEnter() {
   {
     RenderLock lock(*this);
     WIFI_STORE.loadFromFile();
+    WIFI_HINTS.loadFromFile();
   }
 
   // Reset state
@@ -41,6 +44,9 @@ void WifiSelectionActivity::onEnter() {
   forgetPromptSelection = 0;
   autoConnecting = false;
   manualNetworkListRequested = false;
+  attemptChannel = 0;
+  hintFallbackDone = false;
+  awaitingTimeSync = false;
   autoAttemptedSsids.clear();
   autoAttemptedSsids.reserve(WIFI_STORE.getCredentialCount());
 
@@ -53,9 +59,10 @@ void WifiSelectionActivity::onEnter() {
   cachedMacAddress = std::string(macStr);
 
   // No requestUpdate() here: it only sets a flag that ActivityManager::loop() acts on
-  // after onEnter() returns, so the paint landed *after* whichever blocking radio path
-  // below ran, not before it. Both attemptConnection() and startWifiScan() now paint
-  // their own screen ahead of their blocking work instead.
+  // after onEnter() returns, so the paint landed *after* whichever radio path below ran,
+  // not before it. startWifiScan() paints its own screen ahead of its blocking bring-up;
+  // attemptConnection() requests one that lands as soon as the asynchronous
+  // WiFi.begin() has been issued.
 
   // Attempt to auto-connect to known networks. Try the last successful network
   // first for speed (no scan needed to know it's worth trying); if that's not
@@ -359,26 +366,36 @@ void WifiSelectionActivity::attemptConnection() {
   // asynchronously; the paired "WIFI.connected" mark below is the real end edge.
   HEAP_TRACE_SCOPE("WIFI.connect");
   state = autoConnecting ? WifiSelectionState::AUTO_CONNECTING : WifiSelectionState::CONNECTING;
-  connectionStartTime = millis();
   connectedIP.clear();
   connectionError.clear();
+  hintFallbackDone = false;
   WifiDiagLog::append("connecting: ssid=" + selectedSSID + " auto=" + (autoConnecting ? "1" : "0") +
                       " savedPassword=" + (usedSavedPassword ? "1" : "0"));
-  // Paint "Connecting to <ssid>" before the radio work below, not after. requestUpdate()
-  // only sets a flag consumed once ActivityManager::loop() regains control, so with
-  // WiFi.mode() + disconnect + delay(100) + WiFi.begin() in between, the panel kept
-  // showing the previous screen for the whole bring-up. Worst on the OTA path, where
-  // this is the first paint after a reboot and the user has already been staring at a
-  // static frame since pressing the menu item.
-  requestUpdateAndWait();
+  // requestUpdate(), not requestUpdateAndWait(): the panel paints as soon as
+  // ActivityManager::loop() regains control, which is right after the asynchronous
+  // WiFi.begin() below has been issued -- association then runs for seconds afterwards,
+  // so "Connecting to <ssid>" is still up for effectively all of it. Waiting here put a
+  // full e-ink repaint, plus the SD append above, in front of the radio work.
+  requestUpdate();
 
+  prepareRadio();
+  beginConnection(/*useHint=*/true);
+}
+
+void WifiSelectionActivity::prepareRadio() {
   WiFi.persistent(false);  // Credentials are managed by WifiCredentialStore; suppress SDK NVS auto-connect
   WiFi.mode(WIFI_STA);
-  WiFi.disconnect(true, true);  // Abort any in-progress SDK auto-connect and clear NVS-saved SSID
+  // eraseap, but not wifioff: aborting an in-progress SDK auto-connect and clearing the
+  // NVS-saved SSID is the point here, whereas also powering the radio down made the
+  // following WiFi.begin() pay a full driver bring-up on every single attempt. The
+  // settle delay stays because esp_wifi_disconnect() completes asynchronously and an
+  // esp_wifi_connect() issued inside that window is rejected with ESP_ERR_WIFI_CONN.
+  WiFi.disconnect(false, true);
   delay(100);
 
   // Scan all channels so networks with multiple APs use the strongest matching
   // BSSID instead of the first match found by the framework's default fast scan.
+  // Only reached when no BSSID hint applies: a pinned WiFi.begin() skips scanning.
   // Guarded out of the simulator build: crosspoint-simulator's WiFiClass stub
   // doesn't implement these ESP-IDF-specific scan-tuning calls.
 #ifndef SIMULATOR
@@ -391,12 +408,49 @@ void WifiSelectionActivity::attemptConnection() {
   mac.replace(":", "");
   String hostname = "CrossPoint-Reader-" + mac;
   WiFi.setHostname(hostname.c_str());
+}
 
-  if (selectedRequiresPassword && !enteredPassword.empty()) {
-    WiFi.begin(selectedSSID.c_str(), enteredPassword.c_str());
-  } else {
-    WiFi.begin(selectedSSID.c_str());
+void WifiSelectionActivity::beginConnection(const bool useHint) {
+  std::memset(attemptBssid, 0, sizeof(attemptBssid));
+  attemptChannel = 0;
+
+#ifndef SIMULATOR
+  if (useHint) {
+    // Where this SSID was last actually joined. Pinning WiFi.begin() to it removes the
+    // full-channel scan the framework would otherwise run before every association.
+    const auto hint = WIFI_HINTS.find(selectedSSID);
+    if (hint) {
+      std::memcpy(attemptBssid, hint->bssid, sizeof(attemptBssid));
+      attemptChannel = hint->channel;
+    }
   }
+#else
+  (void)useHint;
+#endif
+
+  const char* password = (selectedRequiresPassword && !enteredPassword.empty()) ? enteredPassword.c_str() : nullptr;
+
+  // Last statement before WiFi.begin(): every timeout in wifi_connect_policy is a budget
+  // for the radio, so display and SD work must not be charged against it.
+  connectionStartTime = millis();
+#ifndef SIMULATOR
+  if (attemptChannel != 0) {
+    WiFi.begin(selectedSSID.c_str(), password, attemptChannel, attemptBssid, true);
+    return;
+  }
+#endif
+  WiFi.begin(selectedSSID.c_str(), password);
+}
+
+void WifiSelectionActivity::rememberConnectionHint() {
+#ifndef SIMULATOR
+  const int channel = WiFi.channel();
+  if (!wifi_connect_policy::isValidChannel(channel)) return;
+
+  uint8_t bssid[wifi_connect_policy::BSSID_LEN] = {};
+  WiFi.BSSID(bssid);
+  WIFI_HINTS.remember(selectedSSID, bssid, static_cast<uint8_t>(channel));
+#endif
 }
 
 void WifiSelectionActivity::checkConnectionStatus() {
@@ -439,46 +493,65 @@ void WifiSelectionActivity::checkConnectionStatus() {
     // was the missing piece). Cheap to check on every connection: skipped entirely
     // once time is already valid, so this doesn't add the ~5s SNTP wait on every
     // WiFi connect, only right after a cold boot/OTA restart.
-    // Guarded out of the simulator build: crosspoint-simulator's own HalClock stub
-    // doesn't implement these (its network stack isn't real ESP-IDF/mbedTLS, so the
-    // cert-validation clock issue this works around doesn't apply there).
+    // Started, not waited on: nothing on this screen needs the clock, so the up-to-5s
+    // SNTP wait belongs in loop() (see finishWhenClockSynced) rather than in front of
+    // onComplete(). Guarded out of the simulator build: crosspoint-simulator's own
+    // HalClock stub doesn't implement these (its network stack isn't real
+    // ESP-IDF/mbedTLS, so the cert-validation clock issue this works around doesn't
+    // apply there).
 #ifndef SIMULATOR
-    if (!HalClock::isSystemTimeValid()) {
-      HalClock::quickSyncSystemTime();
+    if (!HalClock::isSystemTimeValid() && HalClock::beginSystemTimeSync()) {
+      awaitingTimeSync = true;
+      timeSyncStartMs = millis();
     }
 #endif
 
-    // Sync RTC from NTP on the first successful WiFi connection only. The DS3231
-    // drifts ~2 ppm so one sync is enough; users can force a re-sync from
-    // Settings > Customise Status Bar > Sync clock now.
-    if (halClock.isAvailable() && !SETTINGS.clockHasBeenSynced) {
-      if (halClock.syncFromNTP()) {
-        SETTINGS.clockHasBeenSynced = 1;
-        SETTINGS.saveToFile();
-      }
-    }
-
-    // Save this as the last connected network - SD card operations need lock as
-    // we use SPI for both
+    // Save this as the last connected network, plus where it was actually joined so the
+    // next attempt can skip the scan - SD card operations need lock as we use SPI for both
     {
       RenderLock lock(*this);
       WIFI_STORE.setLastConnectedSsid(selectedSSID);
+      rememberConnectionHint();
     }
 
     // If we entered a new password, ask if user wants to save it
-    // Otherwise, immediately complete so parent can start web server
+    // Otherwise fall through to CONNECTED, which completes as soon as the clock is ready
     if (!usedSavedPassword && !enteredPassword.empty()) {
       state = WifiSelectionState::SAVE_PROMPT;
       savePromptSelection = 0;  // Default to "Yes"
       requestUpdate();
     } else {
-      // Using saved password or open network - complete immediately
-      LOG_DBG("WIFI",
-              "Connected with saved/open credentials, "
-              "completing immediately");
-      onComplete(true);
+      LOG_DBG("WIFI", "Connected with saved/open credentials");
+      state = WifiSelectionState::CONNECTED;
+      // Only worth a repaint when there is actually a wait to show; otherwise loop()
+      // completes on the very next tick and the paint would never be seen.
+      if (awaitingTimeSync) {
+        requestUpdate();
+      }
     }
     return;
+  }
+
+  // A pinned attempt that hard-fails or stalls means the AP moved (roamed, changed
+  // channel) or is gone. Retry once with a full scan before reporting failure or moving
+  // on to the next saved network, and drop the stale hint so the next connect starts
+  // clean instead of paying for it again.
+  if (attemptChannel != 0 && !hintFallbackDone) {
+    const bool hintHardFail = (status == WL_CONNECT_FAILED || status == WL_NO_SSID_AVAIL);
+    if (hintHardFail || millis() - connectionStartTime > wifi_connect_policy::HINT_ATTEMPT_TIMEOUT_MS) {
+      WifiDiagLog::append("hint-fallback: ssid=" + selectedSSID + " reason=" + (hintHardFail ? "failed" : "timeout"));
+      hintFallbackDone = true;
+      WiFi.disconnect(false, false);
+      delay(100);
+      beginConnection(/*useHint=*/false);
+      // After beginConnection(), so this SD write overlaps the association it follows
+      // rather than delaying it.
+      {
+        RenderLock lock(*this);
+        WIFI_HINTS.forget(selectedSSID);
+      }
+      return;
+    }
   }
 
   if (status == WL_CONNECT_FAILED || status == WL_NO_SSID_AVAIL) {
@@ -498,10 +571,11 @@ void WifiSelectionActivity::checkConnectionStatus() {
     return;
   }
 
-  // Check for timeout. Auto-connect uses the shorter AUTO_CONNECTION_TIMEOUT_MS
-  // so a saved network that's merely out of range doesn't eat 15s before moving
-  // on to the next one.
-  const unsigned long timeoutMs = autoConnecting ? AUTO_CONNECTION_TIMEOUT_MS : CONNECTION_TIMEOUT_MS;
+  // Check for timeout. Auto-connect uses the shorter budget so a saved network that's
+  // merely out of range doesn't eat 15s before moving on to the next one; see
+  // wifi_connect_policy for the measurements both budgets are sized against.
+  const unsigned long timeoutMs =
+      autoConnecting ? wifi_connect_policy::AUTO_CONNECTION_TIMEOUT_MS : wifi_connect_policy::CONNECTION_TIMEOUT_MS;
   if (millis() - connectionStartTime > timeoutMs) {
     WiFi.disconnect();
     connectionError = tr(STR_ERROR_CONNECTION_TIMEOUT);
@@ -515,6 +589,31 @@ void WifiSelectionActivity::checkConnectionStatus() {
     requestUpdate();
     return;
   }
+}
+
+void WifiSelectionActivity::finishWhenClockSynced() {
+  if (awaitingTimeSync) {
+    const bool synced = HalClock::isSystemTimeSyncComplete();
+    if (!synced && millis() - timeSyncStartMs < wifi_connect_policy::TIME_SYNC_TIMEOUT_MS) {
+      return;  // Poll again next tick; the connected screen is already up.
+    }
+    awaitingTimeSync = false;
+    if (!synced) {
+      LOG_ERR("WIFI", "NTP sync did not land; HTTPS cert validation may fail until it does");
+    }
+  }
+
+  // Sync RTC from NTP on the first successful WiFi connection only. The DS3231
+  // drifts ~2 ppm so one sync is enough; users can force a re-sync from
+  // Settings > Customise Status Bar > Sync clock now.
+  if (halClock.isAvailable() && !SETTINGS.clockHasBeenSynced) {
+    if (halClock.syncFromNTP()) {
+      SETTINGS.clockHasBeenSynced = 1;
+      SETTINGS.saveToFile();
+    }
+  }
+
+  onComplete(true);
 }
 
 void WifiSelectionActivity::loop() {
@@ -595,11 +694,11 @@ void WifiSelectionActivity::loop() {
         RenderLock lock(*this);
         WIFI_STORE.addCredential(selectedSSID, enteredPassword);
       }
-      // Complete - parent will start web server
-      onComplete(true);
+      // Parent will start the web server, once the clock is usable for TLS
+      state = WifiSelectionState::CONNECTED;
     } else if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
       // Skip saving, complete anyway
-      onComplete(true);
+      state = WifiSelectionState::CONNECTED;
     }
     return;
   }
@@ -639,11 +738,9 @@ void WifiSelectionActivity::loop() {
     return;
   }
 
-  // Handle connected state (should not normally be reached - connection
-  // completes immediately)
+  // Connected: hand the result to the parent as soon as the clock is usable for TLS.
   if (state == WifiSelectionState::CONNECTED) {
-    // Safety fallback - immediately complete
-    onComplete(true);
+    finishWhenClockSynced();
     return;
   }
 

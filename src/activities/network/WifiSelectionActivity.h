@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "activities/Activity.h"
+#include "network/WifiConnectPolicy.h"
 #include "util/ButtonNavigator.h"
 
 struct Rect;
@@ -90,12 +91,20 @@ class WifiSelectionActivity final : public Activity {
   int savePromptSelection = 0;
   int forgetPromptSelection = 0;
 
-  // Connection timeout. Auto-connect uses a shorter timeout than a user-initiated
-  // connect: it may need to work through several saved networks in sequence, and a
-  // network that's merely out of range should fail fast rather than eat 15s each.
-  static constexpr unsigned long CONNECTION_TIMEOUT_MS = 15000;
-  static constexpr unsigned long AUTO_CONNECTION_TIMEOUT_MS = 7000;
+  // Set immediately before WiFi.begin(), so the budgets in wifi_connect_policy measure
+  // the radio's own work and nothing else.
   unsigned long connectionStartTime = 0;
+
+  // BSSID/channel the current attempt was pinned to; channel 0 means "full scan".
+  uint8_t attemptBssid[wifi_connect_policy::BSSID_LEN] = {};
+  uint8_t attemptChannel = 0;
+  // Whether the one silent full-scan retry after a failed hint has already been spent.
+  bool hintFallbackDone = false;
+
+  // Set while an SNTP sync started at association is still outstanding. The activity
+  // stays in CONNECTED and polls it from loop() rather than blocking the connect path.
+  bool awaitingTimeSync = false;
+  unsigned long timeSyncStartMs = 0;
 
   void renderNetworkList(const Rect* screen, const ThemeMetrics* metrics) const;
   void renderPasswordEntry(const Rect* screen, const ThemeMetrics* metrics) const;
@@ -112,7 +121,18 @@ class WifiSelectionActivity final : public Activity {
   void promptHiddenSsid();
   void promptPasswordEntry();
   void attemptConnection();
+  // Puts the radio into a known state for a connect attempt. Everything slow or
+  // display-bound belongs here, ahead of beginConnection()'s clock.
+  void prepareRadio();
+  // Issues WiFi.begin(), pinned to the saved BSSID/channel when useHint is set and one
+  // is stored, and starts the timeout clock. checkConnectionStatus() retries once with
+  // useHint=false if a pinned attempt doesn't land.
+  void beginConnection(bool useHint);
+  // Stores where this connection actually landed, for the next attempt's fast path.
+  void rememberConnectionHint();
   void checkConnectionStatus();
+  // Completes the activity once the SNTP sync started at association lands or times out.
+  void finishWhenClockSynced();
   // Auto-connect helpers: try a saved credential, fall through the scan result for
   // the next untried saved network, or give up and drop to the manual list.
   bool hasAttemptedAutoSsid(const std::string& ssid) const;
