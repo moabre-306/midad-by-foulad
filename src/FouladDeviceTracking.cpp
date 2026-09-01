@@ -11,6 +11,7 @@
 
 #include "CrossPointSettings.h"
 #include "FouladEbooksConfig.h"
+#include "FouladTelemetryGate.h"
 #include "KOReaderCredentialStore.h"
 #include "KOReaderSyncClient.h"
 #include "MidadAppSettings.h"
@@ -70,6 +71,21 @@ void diagLog(const std::string& line) { RollingSdLog::append(DebugLog::PATH, "[F
 // diagLog(), but these three lines are the only local record of an actual panic once
 // crash_report.txt itself is deleted, and per CrossPointSettings::debugLoggingEnabled's
 // own carve-out, crash reporting must survive regardless of the debug-logging preference.
+// Single point every network-touching entry below returns through when the gate refuses.
+// Logs the reason at most once per reason per boot: the whole point of this change is that
+// a refused upload must not become its own source of SD writes and heap churn.
+bool telemetryRefused(const char* what) {
+  const FouladTelemetryGate::Block b = FouladTelemetryGate::check(millis());
+  if (b == FouladTelemetryGate::Block::None) return false;
+  static uint8_t loggedReasons = 0;
+  const uint8_t bit = static_cast<uint8_t>(1U << static_cast<uint8_t>(b));
+  if ((loggedReasons & bit) == 0) {
+    loggedReasons = static_cast<uint8_t>(loggedReasons | bit);
+    LOG_DBG(TAG, "%s skipped: %s", what, FouladTelemetryGate::describe(b));
+  }
+  return true;
+}
+
 void criticalDiagLog(const std::string& line) {
   RollingSdLog::append(DebugLog::PATH, "[FDT] " + line, DebugLog::MAX_LINES, /*force=*/true);
 }
@@ -554,6 +570,8 @@ static void captureLatestFirmware(JsonVariantConst latest) {
 }
 
 void registerDevice(const std::string& username, const std::string& password) {
+  if (telemetryRefused("registration")) return;
+
   if (!wifiConnected() || username.empty() || password.empty()) return;
 
   JsonDocument doc;
@@ -585,6 +603,8 @@ void registerDevice(const std::string& username, const std::string& password) {
 
 void reportReadingStats(const std::string& username, const std::string& password, const std::string& fouladBookId,
                         const int progressPercent, const std::string& lastPosition, const uint32_t secondsRead) {
+  if (telemetryRefused("reading-stats")) return;
+
   if (!wifiConnected() || username.empty() || password.empty() || fouladBookId.empty()) return;
 
   if (postReadingStatsOnce(username, password, fouladBookId, progressPercent, lastPosition, secondsRead)) {
@@ -605,6 +625,8 @@ void reportReadingStats(const std::string& username, const std::string& password
 }
 
 void flushPendingReadingStats(const std::string& username, const std::string& password) {
+  if (telemetryRefused("reading-stats")) return;
+
   if (!wifiConnected() || username.empty() || password.empty()) return;
 
   // Driven by the stats store, not RecentBooksStore. Recents caps at 10 and
@@ -664,6 +686,8 @@ void flushPendingKOReaderSync() {
 }
 
 void uploadDebugLog(const std::string& username, const std::string& password) {
+  if (telemetryRefused("debug-log upload")) return;
+
   if (!DebugLogging::enabled() || !wifiConnected() || username.empty() || password.empty()) return;
   if (!Storage.exists(DebugLog::PATH)) return;
 
@@ -750,6 +774,8 @@ std::string readCrashReportSummary() {
 }
 
 bool uploadCrashReport(const std::string& username, const std::string& password) {
+  if (telemetryRefused("crash-report upload")) return false;
+
   if (!wifiConnected() || username.empty() || password.empty()) return false;
   if (!Storage.exists(CRASH_REPORT_PATH)) return false;
 
@@ -789,6 +815,8 @@ bool uploadCrashReport(const std::string& username, const std::string& password)
 }
 
 void flushPendingCrashReport(const std::string& username, const std::string& password) {
+  if (telemetryRefused("crash-report upload")) return;
+
   if (!Storage.exists(CRASH_REPORT_PATH)) return;  // nothing waiting
   if (!uploadCrashReport(username, password)) return;
   // See readCrashReportSummary(): capture the panic reason locally before the SD
@@ -804,6 +832,8 @@ void flushPendingCrashReport(const std::string& username, const std::string& pas
 }
 
 void reportDeviceStats(const std::string& username, const std::string& password) {
+  if (telemetryRefused("device-stats")) return;
+
   if (!wifiConnected() || username.empty() || password.empty()) return;
 
   READING_STATS.ensureLoaded();

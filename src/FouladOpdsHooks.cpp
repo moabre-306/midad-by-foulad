@@ -6,6 +6,7 @@
 
 #include "FouladDeviceTracking.h"
 #include "FouladEbooksConfig.h"
+#include "FouladTelemetryGate.h"
 #include "RecentBooksStore.h"
 
 namespace {
@@ -26,30 +27,40 @@ void reportDeviceTrackingOnConnect(const OpdsServer& server) {
   FouladDeviceTracking::flushPendingKOReaderSync();
 
   if (server.url != FOULAD_EBOOKS_URL) return;
-  FouladDeviceTracking::registerDevice(server.username, server.password);
-  // Reading itself never keeps WiFi connected, so this is the one reliable
-  // moment to sync any progress accumulated since the last time the device
-  // was online.
-  FouladDeviceTracking::flushPendingReadingStats(server.username, server.password);
-  // Crash reports go the same way, and for a stronger reason: until now the only
-  // path was the user tapping Send on the crash screen. A device that panics and
-  // reboots cleanly never shows that screen, so nobody taps it -- which is why
-  // zero crash reports have ever reached the server while nine debug logs have.
-  // The very failures worth seeing were the ones that reported nothing.
+  FouladTelemetryGate::resetForNewConnection();
+
+  // ONE upload per connect, round-robin, never a burst.
   //
-  // Queued instead: the report sits on the SD card until the next time the device
-  // is online with an account, then uploads unattended and is deleted so it is
-  // sent once. Unconditional -- unlike the debug log below it, this is not gated
-  // on Settings -> Apps -> Debug, because a crash is not routine logging and the
-  // people whose devices crash are the least likely to have opted into anything.
-  FouladDeviceTracking::flushPendingCrashReport(server.username, server.password);
-  // Same reasoning: uploading the debug log here (rather than at the moment
-  // a book is opened, when WiFi is already gone) is what actually delivers
-  // it. No-op unless Settings -> Apps -> Debug is on.
-  FouladDeviceTracking::uploadDebugLog(server.username, server.password);
-  // Device/reading-stats snapshot for the "My Devices" web page's Device
-  // Stats / Reading Stats tabs -- same reliable-moment reasoning.
-  FouladDeviceTracking::reportDeviceStats(server.username, server.password);
+  // These five used to run back-to-back the moment WiFi came up. Each opens its own TLS
+  // session needing a ~16.7KB contiguous buffer, so on a device with ~40KB free and a
+  // largest block well under that, they starved each other and left the heap at 3264
+  // bytes free -- the "slow and stuck" report of 2026-09-01. Whatever is queued still
+  // gets sent, just one connection at a time: crash reports and the debug log are
+  // preserved on SD until their upload actually succeeds, so nothing is lost by waiting.
+  //
+  // Ordered by how irreplaceable the data is. A crash report exists once and explains a
+  // failure nobody else can reproduce; a stats snapshot is regenerated every session.
+  static uint8_t nextTask = 0;
+  constexpr uint8_t TASK_COUNT = 5;
+  const uint8_t task = nextTask;
+  nextTask = static_cast<uint8_t>((nextTask + 1) % TASK_COUNT);
+  switch (task) {
+    case 0:
+      FouladDeviceTracking::flushPendingCrashReport(server.username, server.password);
+      break;
+    case 1:
+      FouladDeviceTracking::registerDevice(server.username, server.password);
+      break;
+    case 2:
+      FouladDeviceTracking::flushPendingReadingStats(server.username, server.password);
+      break;
+    case 3:
+      FouladDeviceTracking::uploadDebugLog(server.username, server.password);
+      break;
+    default:
+      FouladDeviceTracking::reportDeviceStats(server.username, server.password);
+      break;
+  }
 }
 
 void pollDeviceTracking(const OpdsServer& server, const bool isBrowsing) {
@@ -59,6 +70,10 @@ void pollDeviceTracking(const OpdsServer& server, const bool isBrowsing) {
                                lastDeviceTrackingCheckMs, DEVICE_TRACKING_RECHECK_MS);
   if (!shouldPoll) return;
   lastDeviceTrackingCheckMs = nowMs;
+  // The 30s cadence above is only the earliest this may re-run. The gate holds the actual
+  // schedule, widening it after each failure, so a server that cannot answer is retried
+  // less and less often instead of every 30s forever.
+  if (!FouladTelemetryGate::allow(nowMs)) return;
   FouladDeviceTracking::registerDevice(server.username, server.password);
 }
 
