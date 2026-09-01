@@ -95,12 +95,6 @@ class WifiSelectionActivity final : public Activity {
   // the radio's own work and nothing else.
   unsigned long connectionStartTime = 0;
 
-  // BSSID/channel the current attempt was pinned to; channel 0 means "full scan".
-  uint8_t attemptBssid[wifi_connect_policy::BSSID_LEN] = {};
-  uint8_t attemptChannel = 0;
-  // Whether the one silent full-scan retry after a failed hint has already been spent.
-  bool hintFallbackDone = false;
-
   // Set while an SNTP sync started at association is still outstanding. The activity
   // stays in CONNECTED and polls it from loop() rather than blocking the connect path.
   bool awaitingTimeSync = false;
@@ -117,14 +111,18 @@ class WifiSelectionActivity final : public Activity {
   // How many times onComplete() has run. A duplicate has to be visible, not silent.
   uint8_t completionCount = 0;
 
-  // Cancellation of a superseded hinted attempt, in flight. The full-scan attempt does
-  // not start until an STA disconnect event has actually been observed (or the bound in
-  // wifi_connect_policy expires), so a fallback never overlaps the attempt it replaces.
-  bool hintCancelPending = false;
+  // Cancellation of a superseded attempt, in flight. Whatever replaces it -- the next
+  // saved network, a scan, or the failure screen -- does not start until an STA
+  // disconnect event has actually been observed (or the bound in wifi_connect_policy
+  // expires), so two attempts never overlap.
+  bool cancelPending = false;
   bool lateCompletionLogged = false;
   uint32_t cancelledAttemptId = 0;
   uint32_t disconnectsAtCancel = 0;
-  unsigned long hintCancelStartMs = 0;
+  unsigned long cancelStartMs = 0;
+  // What to do once the in-flight cancellation resolves.
+  enum class PendingOutcome { None, AutoConnectFailure, ConnectionFailed };
+  PendingOutcome cancelOutcome = PendingOutcome::None;
 
   void renderNetworkList(const Rect* screen, const ThemeMetrics* metrics) const;
   void renderPasswordEntry(const Rect* screen, const ThemeMetrics* metrics) const;
@@ -144,22 +142,18 @@ class WifiSelectionActivity final : public Activity {
   // Puts the radio into a known state for a connect attempt. Everything slow or
   // display-bound belongs here, ahead of beginConnection()'s clock.
   void prepareRadio();
-  // Issues WiFi.begin(), pinned to the saved BSSID/channel when useHint is set and one
-  // is stored, and starts the timeout clock. checkConnectionStatus() retries once with
-  // useHint=false if a pinned attempt doesn't land.
-  void beginConnection(bool useHint);
-  // Stores where this connection actually landed, for the next attempt's fast path.
-  void rememberConnectionHint();
+  // Issues a full-scan WiFi.begin() and starts the timeout clock.
+  void beginConnection();
   void checkConnectionStatus();
-  // Asks a superseded hinted attempt to stop and records the event-counter baseline the
-  // confirmation is measured against.
-  void requestHintCancellation(bool hardFail);
-  // Progress of an in-flight cancellation. A replacement attempt may be issued only on
-  // the two Confirmed outcomes, each of which rests on an observed state rather than on
-  // elapsed time; ConfirmedAfterRadioStop additionally requires the radio to be brought
-  // back up, having been stopped and deinitialised.
+  // Asks a superseded attempt to stop, records the event-counter baseline the
+  // confirmation is measured against, and states what runs once it resolves.
+  void requestAttemptCancellation(bool hardFail, PendingOutcome outcome);
+  // Progress of an in-flight cancellation. The deferred outcome may run only on the two
+  // Confirmed outcomes, each of which rests on an observed state rather than on elapsed
+  // time; ConfirmedAfterRadioStop additionally requires the radio to be brought back up,
+  // having been stopped and deinitialised.
   enum class CancelProgress { Waiting, Confirmed, ConfirmedAfterRadioStop, Unrecoverable };
-  CancelProgress advanceHintCancellation();
+  CancelProgress advanceCancellation();
   // Whether an observed WL_CONNECTED was produced by the attempt currently in flight,
   // rather than by an earlier one whose GOT_IP predates this attempt's start.
   bool completionBelongsToActiveAttempt();

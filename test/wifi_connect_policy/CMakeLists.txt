@@ -8,7 +8,7 @@ target_include_directories(WifiConnectPolicyTest PRIVATE
 
 target_link_libraries(WifiConnectPolicyTest PRIVATE
   crosspoint_test_common
-  ArduinoJson
+
   GTest::gtest_main
 )
 

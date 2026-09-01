@@ -1,9 +1,6 @@
-#include <ArduinoJson.h>
 #include <gtest/gtest.h>
 
 #include <cstdint>
-#include <string>
-#include <vector>
 
 #include "network/WifiConnectPolicy.h"
 
@@ -18,6 +15,12 @@
 //
 // The measurements are pinned here, next to the budgets derived from them, so a future
 // edit to either has to face the evidence -- same intent as test/x3_memory_budget.
+//
+// A BSSID/channel hint was tried here as a fast path and removed on device evidence: in
+// three logged reconnects on an X3 it never once associated, including twice where the
+// hint held the very BSSID and channel the following full scan then joined (channel 7,
+// then channel 11). Each failure cost a flat ~3.5 s before the scan could start. Do not
+// reintroduce a pinned WiFi.begin() without new hardware evidence that it associates.
 
 namespace {
 
@@ -60,239 +63,24 @@ TEST(WifiConnectPolicy, AutoBudgetStaysShorterThanAManualConnect) {
   EXPECT_LT(AUTO_CONNECTION_TIMEOUT_MS, CONNECTION_TIMEOUT_MS);
 }
 
-TEST(WifiConnectPolicy, HintRetryCannotOutlastAPlainManualAttempt) {
-  // A hinted attempt costs the hint window, then the bounded wait for its cancellation
-  // to be confirmed, then a full retry. That whole sequence must stay inside the manual
-  // budget, or the "fast path" would be the slow one.
-  EXPECT_LT(HINT_ATTEMPT_TIMEOUT_MS, AUTO_CONNECTION_TIMEOUT_MS);
-  EXPECT_LE(HINT_ATTEMPT_TIMEOUT_MS + HINT_CANCEL_CONFIRM_TIMEOUT_MS + AUTO_CONNECTION_TIMEOUT_MS,
-            CONNECTION_TIMEOUT_MS);
-}
-
 TEST(WifiConnectPolicy, CancellationConfirmWaitIsShortEnoughToBeInvisible) {
   // This bounds the gap between esp_wifi_disconnect() and its own STA disconnect event,
   // not a network operation, so it must stay far below the association budget it
   // interrupts -- otherwise the safety wait would itself become a timing regression.
-  EXPECT_GT(HINT_CANCEL_CONFIRM_TIMEOUT_MS, 0UL);
-  EXPECT_LE(HINT_CANCEL_CONFIRM_TIMEOUT_MS, HINT_ATTEMPT_TIMEOUT_MS / 4);
+  EXPECT_GT(CANCEL_CONFIRM_TIMEOUT_MS, 0UL);
+  EXPECT_LE(CANCEL_CONFIRM_TIMEOUT_MS, AUTO_CONNECTION_TIMEOUT_MS / 10);
+}
+
+TEST(WifiConnectPolicy, ASupersededAttemptStillFitsInsideAManualConnect) {
+  // A superseded attempt costs its own budget plus the bounded wait for the teardown to
+  // be confirmed before anything replaces it. That has to stay inside the manual budget,
+  // or the confirmation would turn a failed auto-connect into a visible stall.
+  EXPECT_LE(AUTO_CONNECTION_TIMEOUT_MS + CANCEL_CONFIRM_TIMEOUT_MS, CONNECTION_TIMEOUT_MS);
 }
 
 TEST(WifiConnectPolicy, ClockSyncWaitIsBounded) {
   // Matches HalClock::quickSyncSystemTime's own 50 x 100 ms ceiling.
   EXPECT_EQ(TIME_SYNC_TIMEOUT_MS, 5000UL);
-}
-
-TEST(WifiConnectPolicy, BssidRoundTripsThroughItsTextForm) {
-  const uint8_t cases[][BSSID_LEN] = {
-      {0x00, 0x11, 0x22, 0x33, 0x44, 0x55}, {0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, {0xde, 0xad, 0xbe, 0xef, 0x00, 0x01},
-      {0x00, 0x00, 0x00, 0x00, 0x00, 0x01}, {0x0a, 0xb0, 0x0c, 0xd0, 0x0e, 0xf0},
-  };
-
-  for (const auto& bssid : cases) {
-    char text[BSSID_TEXT_LEN + 1];
-    formatBssid(bssid, text);
-    ASSERT_EQ(std::string(text).size(), BSSID_TEXT_LEN);
-
-    uint8_t parsed[BSSID_LEN] = {};
-    ASSERT_TRUE(parseBssid(text, parsed)) << text;
-    for (size_t i = 0; i < BSSID_LEN; ++i) {
-      EXPECT_EQ(parsed[i], bssid[i]) << "byte " << i << " of " << text;
-    }
-  }
-}
-
-TEST(WifiConnectPolicy, FormatsLowercaseHexWithoutSeparators) {
-  const uint8_t bssid[BSSID_LEN] = {0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6};
-  char text[BSSID_TEXT_LEN + 1];
-  formatBssid(bssid, text);
-  EXPECT_STREQ(text, "a1b2c3d4e5f6");
-}
-
-TEST(WifiConnectPolicy, ParsesUppercaseHexToo) {
-  uint8_t parsed[BSSID_LEN] = {};
-  ASSERT_TRUE(parseBssid("A1B2C3D4E5F6", parsed));
-  const uint8_t expected[BSSID_LEN] = {0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6};
-  for (size_t i = 0; i < BSSID_LEN; ++i) EXPECT_EQ(parsed[i], expected[i]);
-}
-
-TEST(WifiConnectPolicy, RejectsMalformedBssidTextWithoutTouchingTheOutput) {
-  // A corrupted or hand-edited JSON value must be ignored, never half-applied: a
-  // partially-parsed BSSID would pin WiFi.begin() to an AP that does not exist.
-  const char* bad[] = {
-      "",
-      "a1b2c3d4e5f",        // one digit short
-      "a1b2c3d4e5f6a",      // one digit long
-      "a1b2c3d4e5fg",       // non-hex digit
-      "a1:b2:c3:d4:e5:f6",  // separators
-      "a1b2 c3d4e5f6",
-  };
-
-  for (const char* text : bad) {
-    uint8_t out[BSSID_LEN] = {9, 9, 9, 9, 9, 9};
-    EXPECT_FALSE(parseBssid(text, out)) << "accepted: '" << text << "'";
-    for (size_t i = 0; i < BSSID_LEN; ++i) EXPECT_EQ(out[i], 9) << "clobbered on '" << text << "'";
-  }
-
-  uint8_t out[BSSID_LEN] = {9, 9, 9, 9, 9, 9};
-  EXPECT_FALSE(parseBssid(nullptr, out));
-}
-
-TEST(WifiConnectPolicy, TreatsAnAllZeroBssidAsNothingRemembered) {
-  const uint8_t none[BSSID_LEN] = {};
-  EXPECT_FALSE(isKnownBssid(none));
-  EXPECT_FALSE(isUsableHint(none, 6));
-
-  const uint8_t some[BSSID_LEN] = {0, 0, 0, 0, 0, 1};
-  EXPECT_TRUE(isKnownBssid(some));
-  EXPECT_TRUE(isUsableHint(some, 6));
-}
-
-TEST(WifiConnectPolicy, AcceptsOnlyTwoPointFourGigahertzChannels) {
-  // The ESP32-C3 has no 5 GHz radio; anything else in the file is corruption.
-  EXPECT_FALSE(isValidChannel(0));
-  EXPECT_TRUE(isValidChannel(1));
-  EXPECT_TRUE(isValidChannel(14));
-  EXPECT_FALSE(isValidChannel(15));
-  EXPECT_FALSE(isValidChannel(36));
-  EXPECT_FALSE(isValidChannel(-1));
-  EXPECT_FALSE(isValidChannel(255));
-}
-
-TEST(WifiConnectPolicy, NeedsBothHalvesOfAHintToUseIt) {
-  const uint8_t bssid[BSSID_LEN] = {0xde, 0xad, 0xbe, 0xef, 0x00, 0x01};
-  EXPECT_FALSE(isUsableHint(bssid, 0));  // BSSID without a channel
-  EXPECT_TRUE(isUsableHint(bssid, 11));
-}
-
-// --- File-level coverage -----------------------------------------------------
-// WifiConnectionHintStore::fromJson cannot be linked on the host (PersistableStore pulls
-// in Arduino.h), so these drive the exact extraction it performs -- the same ArduinoJson
-// document, the same `obj[key] | default` reads, the same parseHintRecord call -- against
-// whole file bodies. What is being pinned is that a corrupt, truncated, or absent
-// /.crosspoint/wifi_hints.json yields no usable hints and no partial writes, so the
-// connect path degrades to an ordinary full scan.
-
-struct LoadedHint {
-  std::string ssid;
-  uint8_t bssid[BSSID_LEN];
-  uint8_t channel;
-};
-
-// Mirrors WifiConnectionHintStore::fromJson's loop. Returns empty whenever the document
-// itself fails to parse, which is what readDocFromFile reports for a corrupt or absent
-// file before fromJson is ever reached.
-std::vector<LoadedHint> loadHints(const std::string& fileBody) {
-  std::vector<LoadedHint> loaded;
-
-  JsonDocument doc;
-  if (deserializeJson(doc, fileBody) != DeserializationError::Ok) return loaded;
-
-  for (JsonObjectConst obj : doc["hints"].as<JsonArrayConst>()) {
-    LoadedHint entry{};
-    // Sentinel: anything left at 0xEE proves parseHintRecord did not write on rejection.
-    for (size_t i = 0; i < BSSID_LEN; ++i) entry.bssid[i] = 0xEE;
-    entry.channel = 0xEE;
-
-    entry.ssid = obj["ssid"] | "";
-    if (entry.ssid.empty()) continue;
-
-    if (!parseHintRecord(obj["bssid"] | "", obj["channel"] | 0, entry.bssid, entry.channel)) {
-      // Rejected records must be byte-for-byte untouched.
-      for (size_t i = 0; i < BSSID_LEN; ++i) EXPECT_EQ(entry.bssid[i], 0xEE) << "half-written bssid byte " << i;
-      EXPECT_EQ(entry.channel, 0xEE) << "half-written channel";
-      continue;
-    }
-    loaded.push_back(entry);
-  }
-  return loaded;
-}
-
-TEST(WifiConnectPolicyFile, UnreadableOrAbsentFileYieldsNoHints) {
-  // readDocFromFile returns false for a missing file, so fromJson never runs and the
-  // store stays empty; an empty or whitespace-only body parses to nothing either way.
-  EXPECT_TRUE(loadHints("").empty());
-  EXPECT_TRUE(loadHints("   ").empty());
-}
-
-TEST(WifiConnectPolicyFile, TruncatedOrGarbageFileYieldsNoHints) {
-  const char* bodies[] = {
-      R"({"hints":[{"ssid":"Green","bssid":"a1b2c3d4e5f6","chan)",  // truncated mid-key
-      R"({"hints":[{"ssid":"Green",)",                              // truncated mid-object
-      "\x00\x01\x02 not json at all",
-      "<html>500 Internal Server Error</html>",
-      R"({"hints":)",
-  };
-  for (const char* body : bodies) {
-    EXPECT_TRUE(loadHints(body).empty()) << "accepted: " << body;
-  }
-}
-
-TEST(WifiConnectPolicyFile, WellFormedButEmptyOrWrongShapeYieldsNoHints) {
-  EXPECT_TRUE(loadHints("{}").empty());
-  EXPECT_TRUE(loadHints(R"({"hints":[]})").empty());
-  // 'hints' present but not an array: as<JsonArrayConst>() iterates zero times.
-  EXPECT_TRUE(loadHints(R"({"hints":"nope"})").empty());
-  EXPECT_TRUE(loadHints(R"({"hints":{"ssid":"Green"}})").empty());
-}
-
-TEST(WifiConnectPolicyFile, RejectsEveryMalformedRecordWithoutHalfApplyingIt) {
-  const char* records[] = {
-      R"({"ssid":"Green"})",                         // no bssid, no channel
-      R"({"ssid":"Green","channel":6})",             // no bssid
-      R"({"ssid":"Green","bssid":"a1b2c3d4e5f6"})",  // no channel
-      R"({"ssid":"Green","bssid":"a1b2c3d4e5f6","channel":0})",
-      R"({"ssid":"Green","bssid":"a1b2c3d4e5f6","channel":36})",  // 5 GHz: no such radio
-      R"({"ssid":"Green","bssid":"a1b2c3d4e5f6","channel":999})",
-      R"({"ssid":"Green","bssid":"a1b2c3d4e5f6","channel":-1})",
-      R"({"ssid":"Green","bssid":"a1b2c3d4e5f","channel":6})",    // one digit short
-      R"({"ssid":"Green","bssid":"a1b2c3d4e5f6a","channel":6})",  // one digit long
-      R"({"ssid":"Green","bssid":"zzzzzzzzzzzz","channel":6})",   // non-hex
-      R"({"ssid":"Green","bssid":"a1:b2:c3:d4:e5:f6","channel":6})",
-      R"({"ssid":"Green","bssid":"000000000000","channel":6})",  // all-zero = no BSSID
-      R"({"ssid":"Green","bssid":12345,"channel":6})",           // wrong type
-      R"({"ssid":"Green","bssid":"a1b2c3d4e5f6","channel":"six"})",
-      R"({"ssid":"","bssid":"a1b2c3d4e5f6","channel":6})",  // no SSID to key on
-  };
-
-  for (const char* record : records) {
-    const std::string body = std::string(R"({"hints":[)") + record + "]}";
-    EXPECT_TRUE(loadHints(body).empty()) << "accepted: " << record;
-  }
-}
-
-TEST(WifiConnectPolicyFile, KeepsTheGoodRecordsBesideTheBadOnes) {
-  const std::string body = R"({"hints":[
-      {"ssid":"Bad","bssid":"a1b2c3d4e5f","channel":6},
-      {"ssid":"Green","bssid":"a1b2c3d4e5f6","channel":11},
-      {"ssid":"AlsoBad","bssid":"a1b2c3d4e5f6","channel":36}
-  ]})";
-
-  const auto loaded = loadHints(body);
-  ASSERT_EQ(loaded.size(), 1u);
-  EXPECT_EQ(loaded[0].ssid, "Green");
-  EXPECT_EQ(loaded[0].channel, 11);
-  const uint8_t expected[BSSID_LEN] = {0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6};
-  for (size_t i = 0; i < BSSID_LEN; ++i) EXPECT_EQ(loaded[0].bssid[i], expected[i]);
-}
-
-TEST(WifiConnectPolicyFile, SurvivesARoundTripThroughTheWrittenForm) {
-  const uint8_t bssid[BSSID_LEN] = {0x00, 0x1a, 0x2b, 0x3c, 0x4d, 0x5e};
-  char text[BSSID_TEXT_LEN + 1];
-  formatBssid(bssid, text);
-
-  JsonDocument doc;
-  JsonObject obj = doc["hints"].to<JsonArray>().add<JsonObject>();
-  obj["ssid"] = "Green";
-  obj["bssid"] = text;
-  obj["channel"] = 1;
-
-  std::string body;
-  serializeJson(doc, body);
-
-  const auto loaded = loadHints(body);
-  ASSERT_EQ(loaded.size(), 1u);
-  EXPECT_EQ(loaded[0].channel, 1);
-  for (size_t i = 0; i < BSSID_LEN; ++i) EXPECT_EQ(loaded[0].bssid[i], bssid[i]);
 }
 
 }  // namespace
