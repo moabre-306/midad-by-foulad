@@ -84,7 +84,6 @@ void WifiSelectionActivity::onEnter() {
   awaitingTimeSync = false;
   cancelPending = false;
   cancelOutcome = PendingOutcome::None;
-  lateCompletionLogged = false;
   associationMs = 0;
   autoAttemptedSsids.clear();
   autoAttemptedSsids.reserve(WIFI_STORE.getCredentialCount());
@@ -132,9 +131,6 @@ void WifiSelectionActivity::onExit() {
   // Before anything else: the callback must not outlive the activity that armed it.
   WiFi.removeEvent(onStaNetworkEvent, ARDUINO_EVENT_WIFI_STA_GOT_IP);
   WiFi.removeEvent(onStaNetworkEvent, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
-  HEAP_TRACE_EVENT("TEMP:WIFI.exit", "mode=%d status=%d completions=%u attempts=%lu", static_cast<int>(WiFi.getMode()),
-                   static_cast<int>(WiFi.status()), static_cast<unsigned>(completionCount),
-                   static_cast<unsigned long>(attemptId));
 #endif
 
   LOG_DBG("WIFI", "Free heap at onExit start: %d bytes", ESP.getFreeHeap());
@@ -468,7 +464,6 @@ void WifiSelectionActivity::beginConnection() {
   // WL_CONNECTED that does not advance that counter past this point was produced by an
   // earlier attempt (see completionBelongsToActiveAttempt).
   ++attemptId;
-  lateCompletionLogged = false;
 #ifndef SIMULATOR
   gotIpAtAttemptStart = staGotIpEvents;
 #endif
@@ -476,21 +471,16 @@ void WifiSelectionActivity::beginConnection() {
   // Last statement before WiFi.begin(): every timeout in wifi_connect_policy is a budget
   // for the radio, so display and SD work must not be charged against it.
   connectionStartTime = millis();
-  HEAP_TRACE_EVENT("TEMP:WIFI.begin", "attempt=%lu mode=fullscan atMs=%lu", static_cast<unsigned long>(attemptId),
-                   connectionStartTime);
   WiFi.begin(selectedSSID.c_str(), password);
 }
 
 void WifiSelectionActivity::requestAttemptCancellation(const bool hardFail, const PendingOutcome outcome) {
   cancelPending = true;
   cancelOutcome = outcome;
-  cancelledAttemptId = attemptId;
   cancelStartMs = millis();
 #ifndef SIMULATOR
   disconnectsAtCancel = staDisconnectEvents;
 #endif
-  HEAP_TRACE_EVENT("TEMP:WIFI.cancelReq", "attempt=%lu reason=%s afterMs=%lu", static_cast<unsigned long>(attemptId),
-                   hardFail ? "failed" : "timeout", millis() - connectionStartTime);
   WiFi.disconnect(false, false);
 }
 
@@ -503,8 +493,6 @@ WifiSelectionActivity::CancelProgress WifiSelectionActivity::advanceCancellation
   if (staDisconnectEvents != disconnectsAtCancel) {
     // The superseded attempt is definitively finished, so any later GOT_IP can only
     // belong to whatever is started next.
-    HEAP_TRACE_EVENT("TEMP:WIFI.cancelOk", "attempt=%lu via=event waitedMs=%lu status=%d",
-                     static_cast<unsigned long>(cancelledAttemptId), waitedMs, static_cast<int>(WiFi.status()));
     return CancelProgress::Confirmed;
   }
 
@@ -518,8 +506,6 @@ WifiSelectionActivity::CancelProgress WifiSelectionActivity::advanceCancellation
   // cannot untangle afterwards, because a GOT_IP landing after the new attempt's
   // snapshot is indistinguishable from that attempt's own. So escalate to a stop that
   // can be observed, rather than waiting a second time and hoping.
-  HEAP_TRACE_EVENT("TEMP:WIFI.cancelTimeout", "attempt=%lu waitedMs=%lu status=%d",
-                   static_cast<unsigned long>(cancelledAttemptId), waitedMs, static_cast<int>(WiFi.status()));
 
   // WiFi.mode(WIFI_OFF) runs esp_wifi_stop() and then esp_wifi_deinit() inline and
   // reports whether they succeeded; getMode() then reads WIFI_MODE_NULL back out of the
@@ -527,8 +513,6 @@ WifiSelectionActivity::CancelProgress WifiSelectionActivity::advanceCancellation
   // state and not another timeout -- and a stopped, deinitialised driver has no station
   // left to deliver a callback for the old attempt.
   const bool stopped = WiFi.mode(WIFI_OFF) && WiFi.getMode() == WIFI_MODE_NULL;
-  HEAP_TRACE_EVENT("TEMP:WIFI.radioStop", "attempt=%lu stopped=%d mode=%d",
-                   static_cast<unsigned long>(cancelledAttemptId), stopped ? 1 : 0, static_cast<int>(WiFi.getMode()));
   if (!stopped) {
     // A definite negative, not an expired clock: the radio will not say it stopped, so
     // there is no point at which starting another attempt would be sound.
@@ -550,12 +534,6 @@ bool WifiSelectionActivity::completionBelongsToActiveAttempt() {
   if (staGotIpEvents != gotIpAtAttemptStart) {
     return true;
   }
-  if (!lateCompletionLogged) {
-    lateCompletionLogged = true;
-    HEAP_TRACE_EVENT("TEMP:WIFI.lateReject", "activeAttempt=%lu expiredAttempt=%lu gotIp=%lu atStart=%lu",
-                     static_cast<unsigned long>(attemptId), static_cast<unsigned long>(cancelledAttemptId),
-                     static_cast<unsigned long>(staGotIpEvents), static_cast<unsigned long>(gotIpAtAttemptStart));
-  }
   return false;
 #endif
 }
@@ -570,17 +548,6 @@ void WifiSelectionActivity::checkConnectionStatus() {
   // A superseded attempt is still being torn down: nothing may complete, and whatever
   // replaces it may not start, until that teardown has actually been observed.
   if (cancelPending) {
-    if (status == WL_CONNECTED) {
-      // The expired attempt associated after being told to stop. It cannot be the
-      // replacement -- that has not been issued yet -- so this is attributable, and
-      // acting on it would complete the activity on an attempt already declared dead.
-      if (!lateCompletionLogged) {
-        lateCompletionLogged = true;
-        HEAP_TRACE_EVENT("TEMP:WIFI.lateReject", "activeAttempt=none expiredAttempt=%lu status=%d waitedMs=%lu",
-                         static_cast<unsigned long>(cancelledAttemptId), static_cast<int>(status),
-                         millis() - cancelStartMs);
-      }
-    }
     const CancelProgress progress = advanceCancellation();
     if (progress == CancelProgress::Waiting) {
       return;
@@ -644,9 +611,6 @@ void WifiSelectionActivity::checkConnectionStatus() {
     {
       uint8_t traceBssid[6] = {};
       WiFi.BSSID(traceBssid);
-      HEAP_TRACE_EVENT("TEMP:WIFI.gotip", "attempt=%lu mode=fullscan bssid=%02x%02x%02x%02x%02x%02x ch=%d assocMs=%lu",
-                       static_cast<unsigned long>(attemptId), traceBssid[0], traceBssid[1], traceBssid[2],
-                       traceBssid[3], traceBssid[4], traceBssid[5], WiFi.channel(), associationMs);
     }
 #endif
 
@@ -682,8 +646,6 @@ void WifiSelectionActivity::checkConnectionStatus() {
     if (!HalClock::isSystemTimeValid() && HalClock::beginSystemTimeSync()) {
       awaitingTimeSync = true;
       timeSyncStartMs = millis();
-      HEAP_TRACE_EVENT("TEMP:WIFI.ntpBegin", "attempt=%lu boundMs=%lu", static_cast<unsigned long>(attemptId),
-                       wifi_connect_policy::TIME_SYNC_TIMEOUT_MS);
     }
 #endif
 
@@ -750,9 +712,6 @@ void WifiSelectionActivity::finishWhenClockSynced() {
       return;  // Poll again next tick; the connected screen is already up.
     }
     awaitingTimeSync = false;
-    HEAP_TRACE_EVENT("TEMP:WIFI.ntpEnd", "attempt=%lu synced=%d afterMs=%lu boundMs=%lu",
-                     static_cast<unsigned long>(attemptId), synced ? 1 : 0, millis() - timeSyncStartMs,
-                     wifi_connect_policy::TIME_SYNC_TIMEOUT_MS);
     if (!synced) {
       LOG_ERR("WIFI", "NTP sync did not land; HTTPS cert validation may fail until it does");
     }
@@ -771,8 +730,6 @@ void WifiSelectionActivity::finishWhenClockSynced() {
   // Association and total WiFi-ready are separate figures now that the clock sync runs
   // asynchronously: assocMs ends at GOT_IP, readyMs at the point the parent may use the
   // connection for TLS.
-  HEAP_TRACE_EVENT("TEMP:WIFI.ready", "attempt=%lu assocMs=%lu readyMs=%lu", static_cast<unsigned long>(attemptId),
-                   associationMs, millis() - connectionStartTime);
   onComplete(true);
 }
 
@@ -1239,8 +1196,6 @@ void WifiSelectionActivity::onComplete(const bool connected) {
   // Counted, not just logged: a single "completed" line proves nothing about
   // exactly-once, whereas a second line carrying n=2 would be the failure itself.
   ++completionCount;
-  HEAP_TRACE_EVENT("TEMP:WIFI.complete", "n=%u attempt=%lu connected=%d", static_cast<unsigned>(completionCount),
-                   static_cast<unsigned long>(attemptId), connected ? 1 : 0);
 
   ActivityResult result;
   result.isCancelled = !connected;

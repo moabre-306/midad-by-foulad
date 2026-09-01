@@ -116,8 +116,6 @@ class WifiSelectionActivity final : public Activity {
   // disconnect event has actually been observed (or the bound in wifi_connect_policy
   // expires), so two attempts never overlap.
   bool cancelPending = false;
-  bool lateCompletionLogged = false;
-  uint32_t cancelledAttemptId = 0;
   uint32_t disconnectsAtCancel = 0;
   unsigned long cancelStartMs = 0;
   // What to do once the in-flight cancellation resolves.
