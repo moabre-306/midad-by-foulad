@@ -103,4 +103,21 @@ constexpr bool parseBssid(const char* text, uint8_t* out) {
   return true;
 }
 
+// Validates one persisted hint record, as read out of the hint file: the BSSID in its
+// text form and the channel as an integer. Writes to outBssid/outChannel only once the
+// whole record has passed, so a record that is part-valid -- a good channel beside a
+// truncated BSSID, say -- can never leave a half-applied hint behind for WiFi.begin()
+// to associate against.
+constexpr bool parseHintRecord(const char* bssidText, const int channel, uint8_t* outBssid, uint8_t& outChannel) {
+  if (!isValidChannel(channel)) return false;
+
+  uint8_t parsed[BSSID_LEN] = {};
+  if (!parseBssid(bssidText, parsed)) return false;
+  if (!isUsableHint(parsed, static_cast<uint8_t>(channel))) return false;
+
+  for (size_t i = 0; i < BSSID_LEN; ++i) outBssid[i] = parsed[i];
+  outChannel = static_cast<uint8_t>(channel);
+  return true;
+}
+
 }  // namespace wifi_connect_policy

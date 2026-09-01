@@ -1,7 +1,9 @@
+#include <ArduinoJson.h>
 #include <gtest/gtest.h>
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "network/WifiConnectPolicy.h"
 
@@ -150,6 +152,137 @@ TEST(WifiConnectPolicy, NeedsBothHalvesOfAHintToUseIt) {
   const uint8_t bssid[BSSID_LEN] = {0xde, 0xad, 0xbe, 0xef, 0x00, 0x01};
   EXPECT_FALSE(isUsableHint(bssid, 0));  // BSSID without a channel
   EXPECT_TRUE(isUsableHint(bssid, 11));
+}
+
+// --- File-level coverage -----------------------------------------------------
+// WifiConnectionHintStore::fromJson cannot be linked on the host (PersistableStore pulls
+// in Arduino.h), so these drive the exact extraction it performs -- the same ArduinoJson
+// document, the same `obj[key] | default` reads, the same parseHintRecord call -- against
+// whole file bodies. What is being pinned is that a corrupt, truncated, or absent
+// /.crosspoint/wifi_hints.json yields no usable hints and no partial writes, so the
+// connect path degrades to an ordinary full scan.
+
+struct LoadedHint {
+  std::string ssid;
+  uint8_t bssid[BSSID_LEN];
+  uint8_t channel;
+};
+
+// Mirrors WifiConnectionHintStore::fromJson's loop. Returns empty whenever the document
+// itself fails to parse, which is what readDocFromFile reports for a corrupt or absent
+// file before fromJson is ever reached.
+std::vector<LoadedHint> loadHints(const std::string& fileBody) {
+  std::vector<LoadedHint> loaded;
+
+  JsonDocument doc;
+  if (deserializeJson(doc, fileBody) != DeserializationError::Ok) return loaded;
+
+  for (JsonObjectConst obj : doc["hints"].as<JsonArrayConst>()) {
+    LoadedHint entry{};
+    // Sentinel: anything left at 0xEE proves parseHintRecord did not write on rejection.
+    for (size_t i = 0; i < BSSID_LEN; ++i) entry.bssid[i] = 0xEE;
+    entry.channel = 0xEE;
+
+    entry.ssid = obj["ssid"] | "";
+    if (entry.ssid.empty()) continue;
+
+    if (!parseHintRecord(obj["bssid"] | "", obj["channel"] | 0, entry.bssid, entry.channel)) {
+      // Rejected records must be byte-for-byte untouched.
+      for (size_t i = 0; i < BSSID_LEN; ++i) EXPECT_EQ(entry.bssid[i], 0xEE) << "half-written bssid byte " << i;
+      EXPECT_EQ(entry.channel, 0xEE) << "half-written channel";
+      continue;
+    }
+    loaded.push_back(entry);
+  }
+  return loaded;
+}
+
+TEST(WifiConnectPolicyFile, UnreadableOrAbsentFileYieldsNoHints) {
+  // readDocFromFile returns false for a missing file, so fromJson never runs and the
+  // store stays empty; an empty or whitespace-only body parses to nothing either way.
+  EXPECT_TRUE(loadHints("").empty());
+  EXPECT_TRUE(loadHints("   ").empty());
+}
+
+TEST(WifiConnectPolicyFile, TruncatedOrGarbageFileYieldsNoHints) {
+  const char* bodies[] = {
+      R"({"hints":[{"ssid":"Green","bssid":"a1b2c3d4e5f6","chan)",  // truncated mid-key
+      R"({"hints":[{"ssid":"Green",)",                              // truncated mid-object
+      "\x00\x01\x02 not json at all",
+      "<html>500 Internal Server Error</html>",
+      R"({"hints":)",
+  };
+  for (const char* body : bodies) {
+    EXPECT_TRUE(loadHints(body).empty()) << "accepted: " << body;
+  }
+}
+
+TEST(WifiConnectPolicyFile, WellFormedButEmptyOrWrongShapeYieldsNoHints) {
+  EXPECT_TRUE(loadHints("{}").empty());
+  EXPECT_TRUE(loadHints(R"({"hints":[]})").empty());
+  // 'hints' present but not an array: as<JsonArrayConst>() iterates zero times.
+  EXPECT_TRUE(loadHints(R"({"hints":"nope"})").empty());
+  EXPECT_TRUE(loadHints(R"({"hints":{"ssid":"Green"}})").empty());
+}
+
+TEST(WifiConnectPolicyFile, RejectsEveryMalformedRecordWithoutHalfApplyingIt) {
+  const char* records[] = {
+      R"({"ssid":"Green"})",                         // no bssid, no channel
+      R"({"ssid":"Green","channel":6})",             // no bssid
+      R"({"ssid":"Green","bssid":"a1b2c3d4e5f6"})",  // no channel
+      R"({"ssid":"Green","bssid":"a1b2c3d4e5f6","channel":0})",
+      R"({"ssid":"Green","bssid":"a1b2c3d4e5f6","channel":36})",  // 5 GHz: no such radio
+      R"({"ssid":"Green","bssid":"a1b2c3d4e5f6","channel":999})",
+      R"({"ssid":"Green","bssid":"a1b2c3d4e5f6","channel":-1})",
+      R"({"ssid":"Green","bssid":"a1b2c3d4e5f","channel":6})",    // one digit short
+      R"({"ssid":"Green","bssid":"a1b2c3d4e5f6a","channel":6})",  // one digit long
+      R"({"ssid":"Green","bssid":"zzzzzzzzzzzz","channel":6})",   // non-hex
+      R"({"ssid":"Green","bssid":"a1:b2:c3:d4:e5:f6","channel":6})",
+      R"({"ssid":"Green","bssid":"000000000000","channel":6})",  // all-zero = no BSSID
+      R"({"ssid":"Green","bssid":12345,"channel":6})",           // wrong type
+      R"({"ssid":"Green","bssid":"a1b2c3d4e5f6","channel":"six"})",
+      R"({"ssid":"","bssid":"a1b2c3d4e5f6","channel":6})",  // no SSID to key on
+  };
+
+  for (const char* record : records) {
+    const std::string body = std::string(R"({"hints":[)") + record + "]}";
+    EXPECT_TRUE(loadHints(body).empty()) << "accepted: " << record;
+  }
+}
+
+TEST(WifiConnectPolicyFile, KeepsTheGoodRecordsBesideTheBadOnes) {
+  const std::string body = R"({"hints":[
+      {"ssid":"Bad","bssid":"a1b2c3d4e5f","channel":6},
+      {"ssid":"Green","bssid":"a1b2c3d4e5f6","channel":11},
+      {"ssid":"AlsoBad","bssid":"a1b2c3d4e5f6","channel":36}
+  ]})";
+
+  const auto loaded = loadHints(body);
+  ASSERT_EQ(loaded.size(), 1u);
+  EXPECT_EQ(loaded[0].ssid, "Green");
+  EXPECT_EQ(loaded[0].channel, 11);
+  const uint8_t expected[BSSID_LEN] = {0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6};
+  for (size_t i = 0; i < BSSID_LEN; ++i) EXPECT_EQ(loaded[0].bssid[i], expected[i]);
+}
+
+TEST(WifiConnectPolicyFile, SurvivesARoundTripThroughTheWrittenForm) {
+  const uint8_t bssid[BSSID_LEN] = {0x00, 0x1a, 0x2b, 0x3c, 0x4d, 0x5e};
+  char text[BSSID_TEXT_LEN + 1];
+  formatBssid(bssid, text);
+
+  JsonDocument doc;
+  JsonObject obj = doc["hints"].to<JsonArray>().add<JsonObject>();
+  obj["ssid"] = "Green";
+  obj["bssid"] = text;
+  obj["channel"] = 1;
+
+  std::string body;
+  serializeJson(doc, body);
+
+  const auto loaded = loadHints(body);
+  ASSERT_EQ(loaded.size(), 1u);
+  EXPECT_EQ(loaded[0].channel, 1);
+  for (size_t i = 0; i < BSSID_LEN; ++i) EXPECT_EQ(loaded[0].bssid[i], bssid[i]);
 }
 
 }  // namespace

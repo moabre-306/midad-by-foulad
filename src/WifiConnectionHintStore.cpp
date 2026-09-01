@@ -35,12 +35,13 @@ bool WifiConnectionHintStore::fromJson(JsonVariantConst doc) {
     if (entry.ssid.empty()) continue;
 
     // Anything that does not validate is dropped rather than repaired: a hint is a
-    // performance cache, and a wrong one would cost a retry on every connect.
-    if (!wifi_connect_policy::parseBssid(obj["bssid"] | "", entry.hint.bssid)) continue;
-    const int channel = obj["channel"] | 0;
-    if (!wifi_connect_policy::isValidChannel(channel)) continue;
-    entry.hint.channel = static_cast<uint8_t>(channel);
-    if (!wifi_connect_policy::isUsableHint(entry.hint.bssid, entry.hint.channel)) continue;
+    // performance cache, and a wrong one would cost a retry on every connect. A missing
+    // or wrongly-typed key yields the default here, which parseHintRecord then rejects,
+    // and it writes nothing at all unless the whole record passes.
+    if (!wifi_connect_policy::parseHintRecord(obj["bssid"] | "", obj["channel"] | 0, entry.hint.bssid,
+                                              entry.hint.channel)) {
+      continue;
+    }
 
     entries.push_back(std::move(entry));
   }
