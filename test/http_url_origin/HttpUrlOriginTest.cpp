@@ -1,5 +1,8 @@
 #include <gtest/gtest.h>
 
+#include <string>
+#include <vector>
+
 #include "UrlOrigin.h"
 
 // Regression coverage for the origin-comparison logic HttpDownloader's
@@ -85,4 +88,112 @@ TEST(UrlOrigin, MatchesReferenceImplementationAcrossShapes) {
   for (const char* const c : cases) {
     EXPECT_EQ(std::string(urlOrigin(c)), referenceUrlOrigin(c)) << "mismatch for input: " << c;
   }
+}
+
+// --- RedirectOriginGuard -----------------------------------------------------
+//
+// The rule that keeps a device token off a third party's server when a cover or
+// download link redirects. runGetWolf() asks credentialsAllowed() before EVERY
+// request in a chain and sets or clears Basic auth from the answer, so these
+// cases are the security boundary itself, not a helper's convenience.
+
+namespace {
+
+// Walks a chain the way runGetWolf() does -- ask before each request, advance on
+// each redirect -- and reports whether credentials went out on the final request.
+bool credentialsSurviveChain(const std::string& start, const std::vector<std::string>& hops) {
+  RedirectOriginGuard guard(start);
+  bool allowedOnLastRequest = guard.credentialsAllowed();
+  for (const std::string& hop : hops) {
+    guard.onHop(hop);
+    allowedOnLastRequest = guard.credentialsAllowed();
+  }
+  return allowedOnLastRequest;
+}
+
+}  // namespace
+
+TEST(RedirectOriginGuard, AllowsCredentialsOnTheFirstRequest) {
+  const RedirectOriginGuard guard("https://api.midad.one/opds/cover/1.jpg");
+  EXPECT_TRUE(guard.credentialsAllowed());
+  EXPECT_FALSE(guard.leftStartOrigin());
+}
+
+TEST(RedirectOriginGuard, SameOriginRedirectKeepsCredentials) {
+  // A signed cover URL that redirects within the catalogue's own origin is the
+  // case keep-alive exists for; stripping here would break authenticated covers.
+  EXPECT_TRUE(credentialsSurviveChain("https://api.midad.one/opds/cover/1.jpg",
+                                      {"https://api.midad.one/media/signed/1.jpg?sig=abc"}));
+}
+
+TEST(RedirectOriginGuard, DifferentHostDropsCredentials) {
+  // The R2/CDN shape: the token must not reach object storage.
+  EXPECT_FALSE(credentialsSurviveChain("https://api.midad.one/opds/cover/1.jpg",
+                                       {"https://pub-example.r2.dev/covers/1.jpg?X-Amz-Signature=abc"}));
+}
+
+TEST(RedirectOriginGuard, SubdomainChangeDropsCredentials) {
+  EXPECT_FALSE(
+      credentialsSurviveChain("https://api.midad.one/opds/cover/1.jpg", {"https://cdn.midad.one/covers/1.jpg"}));
+}
+
+TEST(RedirectOriginGuard, LegacyHostRedirectDropsCredentials) {
+  // foulad.one redirects to midad.one server-side for devices paired before the
+  // rename (FouladEbooksConfig.h) -- a real cross-origin hop this firmware takes.
+  EXPECT_FALSE(credentialsSurviveChain("http://foulad.one/opds/cover/1.jpg", {"http://midad.one/opds/cover/1.jpg"}));
+}
+
+TEST(RedirectOriginGuard, SchemeDowngradeDropsCredentialsOnTheSameHost) {
+  // Same host, different scheme: still a different origin. Sending Basic auth
+  // over the http hop would put the token on the wire in clear.
+  EXPECT_FALSE(credentialsSurviveChain("https://midad.one/opds/cover/1.jpg", {"http://midad.one/opds/cover/1.jpg"}));
+}
+
+TEST(RedirectOriginGuard, PortChangeDropsCredentialsOnTheSameHost) {
+  EXPECT_FALSE(credentialsSurviveChain("http://192.168.1.50:8080/opds/cover/1.jpg",
+                                       {"http://192.168.1.50:9090/opds/cover/1.jpg"}));
+}
+
+TEST(RedirectOriginGuard, ReturningToTheStartOriginDoesNotRestoreCredentials) {
+  // The latch. A server that can redirect can redirect A -> B -> A; if the guard
+  // reset on the way back, the token would ride the final hop after an attacker
+  // had already had the chain in hand.
+  EXPECT_FALSE(credentialsSurviveChain("https://api.midad.one/opds/cover/1.jpg",
+                                       {"https://evil.example/x", "https://api.midad.one/opds/cover/1.jpg"}));
+}
+
+TEST(RedirectOriginGuard, LatchSurvivesManyLaterSameOriginHops) {
+  EXPECT_FALSE(credentialsSurviveChain(
+      "https://api.midad.one/a",
+      {"https://evil.example/x", "https://api.midad.one/b", "https://api.midad.one/c", "https://api.midad.one/d"}));
+}
+
+TEST(RedirectOriginGuard, PathOnlyRedirectKeepsCredentials) {
+  EXPECT_TRUE(credentialsSurviveChain("https://api.midad.one/opds/root.xml",
+                                      {"https://api.midad.one/opds/v2/root.xml", "https://api.midad.one/opds/v2/a"}));
+}
+
+TEST(RedirectOriginGuard, QueryOnlyRedirectKeepsCredentials) {
+  // urlOrigin() stops at '?', so a signature appended to the same origin is not
+  // mistaken for a cross-origin hop.
+  EXPECT_TRUE(credentialsSurviveChain("https://api.midad.one/opds/cover/1.jpg",
+                                      {"https://api.midad.one/opds/cover/1.jpg?sig=abc"}));
+}
+
+TEST(RedirectOriginGuard, DefaultPortSpellingFailsSafe) {
+  // "https://h" and "https://h:443" are the same origin in principle but differ
+  // textually. Documented behaviour: strip. The failure direction must always be
+  // an unnecessary strip, never an unintended send.
+  EXPECT_FALSE(credentialsSurviveChain("https://api.midad.one/a", {"https://api.midad.one:443/a"}));
+}
+
+TEST(RedirectOriginGuard, LeftStartOriginTracksTheLatch) {
+  RedirectOriginGuard guard("https://api.midad.one/a");
+  EXPECT_FALSE(guard.leftStartOrigin());
+  guard.onHop("https://api.midad.one/b");
+  EXPECT_FALSE(guard.leftStartOrigin());
+  guard.onHop("https://elsewhere.example/c");
+  EXPECT_TRUE(guard.leftStartOrigin());
+  guard.onHop("https://api.midad.one/d");
+  EXPECT_TRUE(guard.leftStartOrigin());
 }

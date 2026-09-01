@@ -205,17 +205,20 @@ HttpDownloader::DownloadError runGetWolf(const std::string& startUrl, const std:
   }
 
   std::string url = startUrl;
-  const std::string_view startOrigin = urlOrigin(startUrl);
-  // Nothing stops Authorization from being re-sent on a hop that now points at a
-  // different host, so it is dropped for good once any hop lands off the original
-  // origin -- same rule as runGet()'s stripping logic. Credentials are set or
-  // cleared explicitly on every hop rather than merely omitted, because a shared
-  // client carries them from one request to the next.
-  bool crossOriginSeen = false;
+  // Views startUrl, which outlives this loop -- deliberately not `url`, which is
+  // rewritten on every redirect. See RedirectOriginGuard for the rule itself.
+  RedirectOriginGuard originGuard(startUrl);
 
   for (int hop = 0; hop <= MAX_REDIRECTS; ++hop) {
     http->setTimeout(HTTP_TIMEOUT_MS);
     http->setInsecure();
+    // Redirects are this loop's to follow, never the client's. SecureHttpClient's
+    // own follow loop would move between origins INSIDE one GET() call, where the
+    // origin check below cannot see it and the credentials set for this hop would
+    // still be attached. Zero is its default, but begin() does not reset it and the
+    // client can now outlive a single request, so the invariant is stated per hop
+    // instead of inherited.
+    http->setFollowRedirects(0);
     if (!http->begin(url)) {
       LOG_ERR("HTTP", "wolfSSL bad URL: %s", url.c_str());
       setLastFailure(HttpDownloader::FailStage::OPEN, 0);
@@ -230,7 +233,12 @@ HttpDownloader::DownloadError runGetWolf(const std::string& startUrl, const std:
     // churned a credentials string, an Arduino String from base64::encode, the
     // "Basic " concatenation and an entry in the header vector -- per hop, per
     // request, on the heap this path is trying not to fragment.
-    if (!crossOriginSeen && !username.empty() && !password.empty()) {
+    //
+    // Set or CLEARED on every hop, never just omitted: begin() clears _headers but
+    // not _authUser/_authPass (SecureHttpClient.h), so a credential set on an
+    // earlier hop -- or, now that the client can be shared, on an earlier request --
+    // would otherwise still be written into the next request's headers.
+    if (originGuard.credentialsAllowed() && !username.empty() && !password.empty()) {
       http->setBasicAuth(username, password);
     } else {
       http->clearBasicAuth();
@@ -261,7 +269,7 @@ HttpDownloader::DownloadError runGetWolf(const std::string& startUrl, const std:
         setLastFailure(HttpDownloader::FailStage::REDIRECT, status);
         return HttpDownloader::HTTP_ERROR;
       }
-      if (urlOrigin(url) != startOrigin) crossOriginSeen = true;
+      originGuard.onHop(url);
       continue;
     }
     if (status != 200) {
