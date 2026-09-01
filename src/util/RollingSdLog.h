@@ -153,20 +153,23 @@ inline void trim(const char* path, size_t maxLines, size_t maxBytes) {
   Storage.rename(tmpPath.c_str(), path);
 }
 
-// force=true bypasses the debugLoggingEnabled gate (still subject to maxLines and the
-// heap-safety floor above). Mirrors CrossPointSettings::debugLoggingEnabled's own
-// carve-out for crash_report.txt: routine per-subsystem chatter stays opt-in so ordinary
-// users don't get SD clutter, but a one-shot event that heads off or explains an actual
-// crash must survive regardless -- those are exactly the sessions where nobody thought to
-// turn debug logging on ahead of time. Use sparingly: reserved for panic-adjacent
-// diagnostics (heap-guard trip points, crash summaries), not routine subsystem logging.
-inline void append(const char* path, const std::string& line, size_t maxLines, bool force = false,
-                   size_t maxBytes = MAX_BYTES) {
-  if ((!force && !DebugLogging::enabled()) || maxLines == 0 || ESP.getFreeHeap() < MIN_SAFE_HEAP_BYTES) return;
+// Fixed-buffer variant: writes exactly `len` bytes from a caller-owned buffer, so it
+// allocates nothing of its own and is deliberately NOT subject to MIN_SAFE_HEAP_BYTES.
+// That floor exists because a std::string growing under -fno-exceptions aborts, and
+// there is no string on this path -- while the events most worth recording (the
+// heap-guard trip points in OpdsBookBrowserActivity/OpdsCoverCache) fire precisely
+// below it, so routing them through append() means the one line worth having is the
+// one that never gets written. Format into a stack buffer with snprintf and call this.
+//
+// trim() streams, so it needs no file-sized allocation and cannot turn a guaranteed
+// line into an abort.
+inline void appendRaw(const char* path, const char* line, size_t len, size_t maxLines, bool force = false,
+                      size_t maxBytes = MAX_BYTES) {
+  if ((!force && !DebugLogging::enabled()) || maxLines == 0 || !line) return;
 
   HalFile file = Storage.open(path, O_WRITE | O_CREAT | O_APPEND);
   if (!file) return;
-  file.write(line.data(), line.size());
+  file.write(line, len);
   file.write(static_cast<uint8_t>('\n'));
   const size_t sizeAfter = file.fileSize();
   // Close before trim() below reopens the same path for read then write (DESTRUCTOR_CLOSES_FILE
@@ -177,6 +180,19 @@ inline void append(const char* path, const std::string& line, size_t maxLines, b
   if (sizeAfter > trimTriggerBytes || (maxBytes != 0 && sizeAfter > maxBytes)) {
     trim(path, maxLines, maxBytes);
   }
+}
+
+// force=true bypasses the debugLoggingEnabled gate (still subject to maxLines and the
+// heap-safety floor above). Mirrors CrossPointSettings::debugLoggingEnabled's own
+// carve-out for crash_report.txt: routine per-subsystem chatter stays opt-in so ordinary
+// users don't get SD clutter, but a one-shot event that heads off or explains an actual
+// crash must survive regardless -- those are exactly the sessions where nobody thought to
+// turn debug logging on ahead of time. Use sparingly: reserved for panic-adjacent
+// diagnostics (heap-guard trip points, crash summaries), not routine subsystem logging.
+inline void append(const char* path, const std::string& line, size_t maxLines, bool force = false,
+                   size_t maxBytes = MAX_BYTES) {
+  if ((!force && !DebugLogging::enabled()) || maxLines == 0 || ESP.getFreeHeap() < MIN_SAFE_HEAP_BYTES) return;
+  appendRaw(path, line.data(), line.size(), maxLines, force, maxBytes);
 }
 
 }  // namespace RollingSdLog

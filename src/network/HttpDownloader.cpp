@@ -17,6 +17,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -133,6 +134,15 @@ HttpDownloader::LastFailure gLastFailure;
 
 void setLastFailure(const HttpDownloader::FailStage stage, const int detail) { gLastFailure = {stage, detail}; }
 
+#if defined(FREEINK_NET_WOLFSSL)
+// The client a HttpDownloader::KeepAliveScope holds open, or null when no scope is
+// active. File-scope for the same reason gLastFailure above is: one network task, no
+// concurrent requests. gKeepAliveDepth counts nesting so an inner scope cannot close
+// the connection an outer one is still using.
+std::unique_ptr<freeink::SecureHttpClient> gKeepAliveClient;
+int gKeepAliveDepth = 0;
+#endif
+
 struct Sink {
   std::function<bool(const uint8_t*, size_t)> write;  // returns false to abort the transfer
   HttpDownloader::ProgressCallback progress;
@@ -175,20 +185,38 @@ HttpDownloader::DownloadError runGetWolf(const std::string& startUrl, const std:
   setLastFailure(HttpDownloader::FailStage::NONE, 0);
   WifiPowerSaveGuard psGuard;
 
+  // One client for the whole request, redirect hops included -- and, inside a
+  // HttpDownloader::KeepAliveScope, for every request the scope spans.
+  // SecureHttpClient keeps its connection open between begin()/GET() pairs to the
+  // same scheme://host:port, so each of those rides the TLS session the first one
+  // negotiated instead of paying another handshake. A per-hop client (what this
+  // used to build) threw that away even for a same-origin redirect, which is the
+  // common shape of a signed cover URL.
+  std::unique_ptr<freeink::SecureHttpClient> owned;
+  freeink::SecureHttpClient* http = gKeepAliveClient.get();
+  if (!http) {
+    owned = makeUniqueNoThrow<freeink::SecureHttpClient>();
+    if (!owned) {
+      LOG_ERR("HTTP", "wolfSSL client alloc failed (free heap: %u bytes)", static_cast<unsigned>(ESP.getFreeHeap()));
+      setLastFailure(HttpDownloader::FailStage::CLIENT_INIT, static_cast<int>(ESP.getFreeHeap()));
+      return HttpDownloader::HTTP_ERROR;
+    }
+    http = owned.get();
+  }
+
   std::string url = startUrl;
   const std::string_view startOrigin = urlOrigin(startUrl);
-  // Unlike runGet(), each hop here builds a fresh SecureHttpClient, so
-  // Authorization isn't "carried over" by a reused handle -- but nothing
-  // stopped it from being unconditionally re-added on every hop regardless of
-  // which host that hop's url now pointed at. Latches permanently once any hop
-  // lands off the original origin, same rule as runGet()'s stripping logic.
+  // Nothing stops Authorization from being re-sent on a hop that now points at a
+  // different host, so it is dropped for good once any hop lands off the original
+  // origin -- same rule as runGet()'s stripping logic. Credentials are set or
+  // cleared explicitly on every hop rather than merely omitted, because a shared
+  // client carries them from one request to the next.
   bool crossOriginSeen = false;
 
   for (int hop = 0; hop <= MAX_REDIRECTS; ++hop) {
-    freeink::SecureHttpClient http;
-    http.setTimeout(HTTP_TIMEOUT_MS);
-    http.setInsecure();
-    if (!http.begin(url)) {
+    http->setTimeout(HTTP_TIMEOUT_MS);
+    http->setInsecure();
+    if (!http->begin(url)) {
       LOG_ERR("HTTP", "wolfSSL bad URL: %s", url.c_str());
       setLastFailure(HttpDownloader::FailStage::OPEN, 0);
       return HttpDownloader::HTTP_ERROR;
@@ -196,18 +224,23 @@ HttpDownloader::DownloadError runGetWolf(const std::string& startUrl, const std:
     // setUserAgent replaces SecureHttpClient's built-in UA; addHeader would
     // append a second User-Agent header, which strict servers reject (aiohttp
     // answers 400 "Duplicate 'User-Agent' header found").
-    http.setUserAgent("CrossPoint-ESP32-" CROSSPOINT_VERSION);
+    http->setUserAgent("CrossPoint-ESP32-" CROSSPOINT_VERSION);
+    // setBasicAuth rather than a hand-built Authorization header: the client
+    // formats it straight into the request line buffer, where the manual version
+    // churned a credentials string, an Arduino String from base64::encode, the
+    // "Basic " concatenation and an entry in the header vector -- per hop, per
+    // request, on the heap this path is trying not to fragment.
     if (!crossOriginSeen && !username.empty() && !password.empty()) {
-      const std::string credentials = username + ":" + password;
-      const String encoded = base64::encode(credentials.c_str());
-      http.addHeader("Authorization", std::string("Basic ") + encoded.c_str());
+      http->setBasicAuth(username, password);
+    } else {
+      http->clearBasicAuth();
     }
 
     LOG_DBG("HTTP", "wolfSSL GET: %s", url.c_str());
-    const int status = http.GET(
-        [&http, &sink](const uint8_t* data, size_t len) {
-          if (http.getStatus() != 200) return true;
-          if (sink.total == 0 && http.hasContentLength()) sink.total = http.getContentLength();
+    const int status = http->GET(
+        [http, &sink](const uint8_t* data, size_t len) {
+          if (http->getStatus() != 200) return true;
+          if (sink.total == 0 && http->hasContentLength()) sink.total = http->getContentLength();
           if (!sink.write(data, len)) return false;
           sink.downloaded += len;
           if (sink.progress && sink.total > 0) sink.progress(sink.downloaded, sink.total);
@@ -215,14 +248,14 @@ HttpDownloader::DownloadError runGetWolf(const std::string& startUrl, const std:
         },
         [&sink]() { return sink.cancelFlag && *sink.cancelFlag; });
 
-    if (http.aborted()) return HttpDownloader::ABORTED;
+    if (http->aborted()) return HttpDownloader::ABORTED;
     if (status < 0) {
       LOG_ERR("HTTP", "wolfSSL request failed: %s", url.c_str());
       setLastFailure(HttpDownloader::FailStage::OPEN, status);
       return HttpDownloader::HTTP_ERROR;
     }
     if (isRedirect(status)) {
-      const std::string location = http.getHeader("location");
+      const std::string location = http->getHeader("location");
       if (location.empty() || !freeink::SecureHttpClient::resolveUrl(url, location, url)) {
         LOG_ERR("HTTP", "wolfSSL bad redirect: %d", status);
         setLastFailure(HttpDownloader::FailStage::REDIRECT, status);
@@ -236,8 +269,8 @@ HttpDownloader::DownloadError runGetWolf(const std::string& startUrl, const std:
       setLastFailure(HttpDownloader::FailStage::STATUS, status);
       return HttpDownloader::HTTP_ERROR;
     }
-    if (http.callbackAborted()) return HttpDownloader::FILE_ERROR;
-    if (!http.responseComplete()) {
+    if (http->callbackAborted()) return HttpDownloader::FILE_ERROR;
+    if (!http->responseComplete()) {
       LOG_ERR("HTTP", "wolfSSL incomplete: got %zu of %zu bytes", sink.downloaded, sink.total);
       setLastFailure(HttpDownloader::FailStage::INCOMPLETE,
                      static_cast<int>(std::min<size_t>(sink.downloaded, INT32_MAX)));
@@ -1179,6 +1212,26 @@ HttpDownloader::DownloadError runGetSecure(const std::string& url, const std::st
 }  // namespace
 
 HttpDownloader::LastFailure HttpDownloader::getLastFailure() { return gLastFailure; }
+
+HttpDownloader::KeepAliveScope::KeepAliveScope() {
+#if defined(FREEINK_NET_WOLFSSL)
+  if (gKeepAliveDepth++ > 0) return;  // an inner scope rides the outer one's client
+  gKeepAliveClient = makeUniqueNoThrow<freeink::SecureHttpClient>();
+  if (!gKeepAliveClient) {
+    // Not an error the caller has to handle: with no shared client every request
+    // falls back to building its own, i.e. connection-per-request as before.
+    LOG_ERR("HTTP", "keep-alive client alloc failed, falling back (free heap: %u bytes)",
+            static_cast<unsigned>(ESP.getFreeHeap()));
+  }
+#endif
+}
+
+HttpDownloader::KeepAliveScope::~KeepAliveScope() {
+#if defined(FREEINK_NET_WOLFSSL)
+  if (--gKeepAliveDepth > 0) return;
+  gKeepAliveClient.reset();  // closes the socket and frees the TLS session
+#endif
+}
 
 bool HttpDownloader::fetchUrl(const std::string& url, Stream& outContent, const std::string& username,
                               const std::string& password) {

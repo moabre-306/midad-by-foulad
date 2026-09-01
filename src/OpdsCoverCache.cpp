@@ -7,15 +7,17 @@
 #include <OpdsParser.h>
 #include <PngToBmpConverter.h>
 
+#include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <string>
 
+#include "OpdsCoverCachePath.h"
 #include "network/HttpDownloader.h"
 #include "util/DebugLog.h"
 #include "util/RollingSdLog.h"
 
 namespace {
-constexpr char CACHE_DIR[] = "/.crosspoint/opds_covers";
 constexpr char TEMP_PATH[] = "/.crosspoint/opds_covers/.tmp_cover";
 
 // Which decoder the downloaded bytes actually need.
@@ -70,9 +72,7 @@ bool hasHeapForCoverDecode() {
 }  // namespace
 
 std::string getOpdsCoverCachePath(const std::string& entryId, int width, int height) {
-  const size_t hash = std::hash<std::string>{}(entryId);
-  return std::string(CACHE_DIR) + "/" + std::to_string(hash) + "_" + std::to_string(width) + "x" +
-         std::to_string(height) + ".bmp";
+  return OpdsCoverCachePath::build(entryId, width, height);
 }
 
 bool ensureOpdsCoverCached(const OpdsEntry& entry, const std::string& username, const std::string& password, int width,
@@ -91,7 +91,7 @@ bool ensureOpdsCoverCached(const OpdsEntry& entry, const std::string& username, 
     Storage.remove(cachePath.c_str());
   }
 
-  Storage.mkdir(CACHE_DIR);
+  Storage.mkdir(OpdsCoverCachePath::DIR);
 
   // Downloaded once at a time (loadGridPageCovers walks covers sequentially),
   // so a single fixed temp filename is safe — no concurrent writers.
@@ -111,15 +111,21 @@ bool ensureOpdsCoverCached(const OpdsEntry& entry, const std::string& username, 
     // loadGridPageCovers already makes for its own pre-loop check).
     LOG_ERR("OPDSCOVER", "Skipping decode, low heap after download: free=%u largest=%u",
             static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMaxAllocHeap()));
-    // Forced through the debugLoggingEnabled gate (see RollingSdLog::append) -- this is
-    // the exact defensive bail this fix exists for (OpdsBookBrowserActivity.cpp's
+    // Forced past the debugLoggingEnabled gate (see RollingSdLog::append) -- this is the
+    // exact defensive bail this fix exists for (OpdsBookBrowserActivity.cpp's
     // hasHeapForNavigation()/hasHeapForCoverWork() comments have the full crash history),
-    // and a near-miss save is worth as much locally as the crash it prevented.
-    RollingSdLog::append(
-        DebugLog::PATH,
-        "[OPDSCOVER] Skipping decode, low heap after download: free=" + std::to_string(ESP.getFreeHeap()) +
-            " largest=" + std::to_string(ESP.getMaxAllocHeap()) + " url=" + entry.coverUrl,
-        DebugLog::MAX_LINES, /*force=*/true);
+    // and a near-miss save is worth as much locally as the crash it prevented. Formatted
+    // into a stack buffer and written through appendRaw(): the std::string concatenation
+    // this replaces allocated on the way to a logger that refuses to write below 32KB
+    // free, i.e. it was most likely to be dropped exactly when it mattered.
+    char line[224];
+    const int len = snprintf(
+        line, sizeof(line), "[OPDSCOVER] Skipping decode, low heap after download: free=%u largest=%u url=%s",
+        static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMaxAllocHeap()), entry.coverUrl.c_str());
+    if (len > 0) {
+      RollingSdLog::appendRaw(DebugLog::PATH, line, std::min<size_t>(static_cast<size_t>(len), sizeof(line) - 1),
+                              DebugLog::MAX_LINES, /*force=*/true);
+    }
     Storage.remove(TEMP_PATH);
     return false;
   }
@@ -158,10 +164,10 @@ bool ensureOpdsCoverCached(const OpdsEntry& entry, const std::string& username, 
 }
 
 bool clearOpdsCoverCache() {
-  if (!Storage.exists(CACHE_DIR)) return true;  // nothing to clear
-  const bool removed = Storage.removeDir(CACHE_DIR);
+  if (!Storage.exists(OpdsCoverCachePath::DIR)) return true;  // nothing to clear
+  const bool removed = Storage.removeDir(OpdsCoverCachePath::DIR);
   if (!removed) {
-    LOG_ERR("OPDSCOVER", "Failed to remove cover cache dir: %s", CACHE_DIR);
+    LOG_ERR("OPDSCOVER", "Failed to remove cover cache dir: %s", OpdsCoverCachePath::DIR);
   }
   return removed;
 }

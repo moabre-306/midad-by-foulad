@@ -12,6 +12,8 @@
 #include <WiFi.h>
 
 #include <algorithm>
+#include <cstdarg>
+#include <cstdio>
 #include <memory>
 
 #include "CrossPointState.h"
@@ -87,6 +89,39 @@ void saveOpdsDiagnosticLog(const std::string& context, bool force = false) {
 
   RollingSdLog::append(DebugLog::PATH, info, DebugLog::MAX_LINES, force);
   LOG_INF("OPDS", "Saved diagnostic log to %s", DebugLog::PATH);
+}
+
+// What the heap guards below log through, instead of saveOpdsDiagnosticLog().
+//
+// Those guards fire exactly where RollingSdLog::append() refuses to write (free heap
+// under its MIN_SAFE_HEAP_BYTES floor), and building the std::string that call wants
+// is itself the throwing-`new` hazard the guard just declined -- so the one event
+// worth a log line was the one most likely to be dropped. Real capture, from a device
+// that hit both arms: "[OPDS] Skipped FETCH diagnostic log, low heap: free=28992".
+//
+// One stack buffer, one snprintf, one O_APPEND write: the line always lands. The
+// rolling-buffer tail is an upgrade added on top only when the heap can take it,
+// since getLastLogs() is the expensive half.
+__attribute__((format(printf, 1, 2))) void saveHeapGuardLog(const char* fmt, ...) {
+  char line[224];
+  int len = snprintf(line, sizeof(line), "[OPDS-ERROR] " CROSSPOINT_VERSION " free=%u largest=%u | ",
+                     static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMaxAllocHeap()));
+  if (len < 0) return;
+  if (static_cast<size_t>(len) < sizeof(line)) {
+    va_list args;
+    va_start(args, fmt);
+    const int extra = vsnprintf(line + len, sizeof(line) - static_cast<size_t>(len), fmt, args);
+    va_end(args);
+    if (extra > 0) len += extra;
+  }
+  // snprintf reports the length it WOULD have written; clamp to what is in the buffer.
+  if (static_cast<size_t>(len) >= sizeof(line)) len = static_cast<int>(sizeof(line)) - 1;
+  RollingSdLog::appendRaw(DebugLog::PATH, line, static_cast<size_t>(len), DebugLog::MAX_LINES, /*force=*/true);
+  LOG_ERR("OPDS", "%s", line);
+
+  if (ESP.getFreeHeap() >= RollingSdLog::MIN_SAFE_HEAP_BYTES) {
+    RollingSdLog::append(DebugLog::PATH, "Last logs:\n" + getLastLogs(), DebugLog::MAX_LINES, /*force=*/true);
+  }
 }
 
 // Rolling browse trace, tagged into the shared debug log (see util/DebugLog.h):
@@ -857,6 +892,13 @@ void OpdsBookBrowserActivity::loadGridPageCovers(const GridLayout& layout, const
   // same way a feed fetch failure already does via saveOpdsDiagnosticLog().
   int coverFailures = 0;
 
+  // One TLS session for the whole page. These are up to itemsPerPage back-to-back GETs
+  // to a single origin, and since the catalogue moved to https every one of them was
+  // paying its own wolfSSL handshake -- the largest transient allocation on this path,
+  // on a heap this walk has already fragmented. Held only while covers are actually
+  // being fetched, and closed before the grid is drawn.
+  const HttpDownloader::KeepAliveScope coverSession;
+
   for (int i = pageStart; i < pageEnd; i++) {
     const auto& entry = entries[layout.bookStart + i];
     if (!entry.coverUrl.empty() &&
@@ -871,11 +913,7 @@ void OpdsBookBrowserActivity::loadGridPageCovers(const GridLayout& layout, const
         // low does not recover within a loop, and each further attempt is another
         // chance to abort. The uncached covers stay uncached and are picked up on a
         // later visit, when the walk that fragmented the heap is behind us.
-        saveOpdsDiagnosticLog("Cover fetch stopped early, low heap: free=" + std::to_string(ESP.getFreeHeap()) +
-                                  " largest=" + std::to_string(ESP.getMaxAllocHeap()) + " at book " +
-                                  std::to_string(i - pageStart + 1) + "/" + std::to_string(totalToProcess),
-                              /*force=*/true);
-        LOG_ERR("OPDS", "Cover fetch stopped early (free heap %u)", static_cast<unsigned>(ESP.getFreeHeap()));
+        saveHeapGuardLog("Cover fetch stopped early at book %d/%d", i - pageStart + 1, totalToProcess);
         break;
       }
       if (!ensureOpdsCoverCached(entry, server.username, server.password, layout.coverWidth, layout.coverHeight)) {
@@ -1078,10 +1116,7 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
               " next=" + (feedNextUrl.empty() ? "-" : feedNextUrl) +
               " prev=" + (feedPrevUrl.empty() ? "-" : feedPrevUrl));
   } else {
-    LOG_ERR("OPDS", "Skipped FETCH diagnostic log, low heap: free=%u", static_cast<unsigned>(ESP.getFreeHeap()));
-    saveOpdsDiagnosticLog(
-        "Skipped FETCH diagnostic log, low heap: free=" + std::to_string(ESP.getFreeHeap()) + " url=" + url,
-        /*force=*/true);
+    saveHeapGuardLog("Skipped FETCH diagnostic log, url=%s", url.c_str());
   }
   requestUpdate();
 }
@@ -1091,10 +1126,7 @@ void OpdsBookBrowserActivity::navigateToEntry(const OpdsEntry& entry) {
   // (navigationHistory.push_back, both buildUrl() calls), which has no OOM-safe fallback
   // the way explicit buffers do. Declining up front beats a silent abort mid-navigation.
   if (!hasHeapForNavigation()) {
-    LOG_ERR("OPDS", "Navigation stopped early, low heap: free=%u", static_cast<unsigned>(ESP.getFreeHeap()));
-    saveOpdsDiagnosticLog(
-        "Navigation stopped early, low heap: free=" + std::to_string(ESP.getFreeHeap()) + " entry=" + entry.id,
-        /*force=*/true);
+    saveHeapGuardLog("Navigation stopped early, entry=%s", entry.id.c_str());
     state = BrowserState::ERROR;
     errorMessage = tr(STR_MEMORY_ERROR);
     requestUpdate();

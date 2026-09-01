@@ -66,6 +66,41 @@ class HttpDownloader {
     bool notModified = false;  // out: server answered 304, no body was delivered
   };
 
+  /**
+   * Keeps ONE connection -- and on https, ONE negotiated TLS session -- open
+   * across a burst of requests, instead of handshaking per request.
+   *
+   * Construct one around a run of fetches and every fetchUrl/downloadToFile made
+   * while it is alive shares the same client; the connection is dropped when the
+   * outermost scope goes out of scope. Nothing else changes: a request to a
+   * different scheme://host:port transparently reconnects, so a mixed burst is
+   * still correct, it just saves nothing.
+   *
+   * What it saves. A wolfSSL handshake is the largest transient allocation on
+   * this device's network path -- certificate chain buffers, a DecodedCert, and
+   * the ECC verify's bignums, allocated and freed in a burst -- and on a heap a
+   * long catalogue walk has already fragmented it is the step that fails. A grid
+   * page of OPDS covers is six back-to-back GETs to one origin, so without this
+   * it pays that six times over to fetch six thumbnails.
+   *
+   * Why a scope and not always-on: an idle session still holds a few KB, which a
+   * caller doing heavy work BETWEEN requests (an image decode, a page layout)
+   * would rather have back. Callers that fetch back-to-back opt in; everything
+   * else keeps connection-per-request.
+   *
+   * Not thread-safe, by the same assumption getLastFailure() already makes: one
+   * network task, no concurrent requests. Nesting is safe -- only the outermost
+   * scope opens and closes the shared client. On a build without wolfSSL this is
+   * an empty object; the esp_http_client path is unaffected.
+   */
+  class KeepAliveScope {
+   public:
+    KeepAliveScope();
+    ~KeepAliveScope();
+    KeepAliveScope(const KeepAliveScope&) = delete;
+    KeepAliveScope& operator=(const KeepAliveScope&) = delete;
+  };
+
   static bool fetchUrl(const std::string& url, const DataCallback& onData, ConditionalGet& conditional,
                        const std::string& username = "", const std::string& password = "");
 
