@@ -154,9 +154,12 @@ class WifiSelectionActivity final : public Activity {
   // Asks a superseded hinted attempt to stop and records the event-counter baseline the
   // confirmation is measured against.
   void requestHintCancellation(bool hardFail);
-  // True once an STA disconnect event has been seen since requestHintCancellation(), or
-  // the confirmation bound has expired. Only then may the full-scan attempt be issued.
-  bool hintCancellationConfirmed();
+  // Progress of an in-flight cancellation. A replacement attempt may be issued only on
+  // the two Confirmed outcomes, each of which rests on an observed state rather than on
+  // elapsed time; ConfirmedAfterRadioStop additionally requires the radio to be brought
+  // back up, having been stopped and deinitialised.
+  enum class CancelProgress { Waiting, Confirmed, ConfirmedAfterRadioStop, Unrecoverable };
+  CancelProgress advanceHintCancellation();
   // Whether an observed WL_CONNECTED was produced by the attempt currently in flight,
   // rather than by an earlier one whose GOT_IP predates this attempt's start.
   bool completionBelongsToActiveAttempt();

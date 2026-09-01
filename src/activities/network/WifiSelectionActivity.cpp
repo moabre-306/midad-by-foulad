@@ -285,7 +285,7 @@ void WifiSelectionActivity::selectNetwork(const int index) {
     // Use saved password - connect directly
     enteredPassword = savedCred->password;
     usedSavedPassword = true;
-    LOG_DBG("WiFi", "Using saved password for %s, length: %zu", selectedSSID.c_str(), enteredPassword.size());
+    LOG_DBG("WiFi", "Using saved credentials for %s", selectedSSID.c_str());
     attemptConnection();
     return;
   }
@@ -523,20 +523,48 @@ void WifiSelectionActivity::requestHintCancellation(const bool hardFail) {
   WiFi.disconnect(false, false);
 }
 
-bool WifiSelectionActivity::hintCancellationConfirmed() {
-  const unsigned long waitedMs = millis() - hintCancelStartMs;
-#ifndef SIMULATOR
-  const bool confirmed = staDisconnectEvents != disconnectsAtCancel;
+WifiSelectionActivity::CancelProgress WifiSelectionActivity::advanceHintCancellation() {
+#ifdef SIMULATOR
+  return CancelProgress::Confirmed;
 #else
-  const bool confirmed = true;
-#endif
-  if (!confirmed && waitedMs < wifi_connect_policy::HINT_CANCEL_CONFIRM_TIMEOUT_MS) {
-    return false;
+  const unsigned long waitedMs = millis() - hintCancelStartMs;
+
+  if (staDisconnectEvents != disconnectsAtCancel) {
+    // The superseded attempt is definitively finished, so any later GOT_IP can only
+    // belong to whatever is started next.
+    HEAP_TRACE_EVENT("TEMP:WIFI.cancelOk", "attempt=%lu via=event waitedMs=%lu status=%d",
+                     static_cast<unsigned long>(cancelledAttemptId), waitedMs, static_cast<int>(WiFi.status()));
+    return CancelProgress::Confirmed;
   }
-  HEAP_TRACE_EVENT("TEMP:WIFI.cancelOk", "attempt=%lu confirmed=%d waitedMs=%lu status=%d",
-                   static_cast<unsigned long>(cancelledAttemptId), confirmed ? 1 : 0, waitedMs,
-                   static_cast<int>(WiFi.status()));
-  return true;
+
+  if (waitedMs < wifi_connect_policy::HINT_CANCEL_CONFIRM_TIMEOUT_MS) {
+    return CancelProgress::Waiting;
+  }
+
+  // Silence is not confirmation. With no disconnect event the superseded attempt may
+  // still be alive, and issuing WiFi.begin() here would put two attempts in flight --
+  // the exact race this confirmation exists to prevent, and one the event counters
+  // cannot untangle afterwards, because a GOT_IP landing after the new attempt's
+  // snapshot is indistinguishable from that attempt's own. So escalate to a stop that
+  // can be observed, rather than waiting a second time and hoping.
+  HEAP_TRACE_EVENT("TEMP:WIFI.cancelTimeout", "attempt=%lu waitedMs=%lu status=%d",
+                   static_cast<unsigned long>(cancelledAttemptId), waitedMs, static_cast<int>(WiFi.status()));
+
+  // WiFi.mode(WIFI_OFF) runs esp_wifi_stop() and then esp_wifi_deinit() inline and
+  // reports whether they succeeded; getMode() then reads WIFI_MODE_NULL back out of the
+  // driver's own started flag. Both are synchronous, so this is an observed stopped
+  // state and not another timeout -- and a stopped, deinitialised driver has no station
+  // left to deliver a callback for the old attempt.
+  const bool stopped = WiFi.mode(WIFI_OFF) && WiFi.getMode() == WIFI_MODE_NULL;
+  HEAP_TRACE_EVENT("TEMP:WIFI.radioStop", "attempt=%lu stopped=%d mode=%d",
+                   static_cast<unsigned long>(cancelledAttemptId), stopped ? 1 : 0, static_cast<int>(WiFi.getMode()));
+  if (!stopped) {
+    // A definite negative, not an expired clock: the radio will not say it stopped, so
+    // there is no point at which starting another attempt would be sound.
+    return CancelProgress::Unrecoverable;
+  }
+  return CancelProgress::ConfirmedAfterRadioStop;
+#endif
 }
 
 bool WifiSelectionActivity::completionBelongsToActiveAttempt() {
@@ -593,17 +621,44 @@ void WifiSelectionActivity::checkConnectionStatus() {
                          millis() - hintCancelStartMs);
       }
     }
-    if (!hintCancellationConfirmed()) {
+    const CancelProgress progress = advanceHintCancellation();
+    if (progress == CancelProgress::Waiting) {
       return;
     }
     hintCancelPending = false;
-    beginConnection(/*useHint=*/false);
-    // After beginConnection(), so this SD write overlaps the association it follows
-    // rather than delaying it.
+
+    // The hinted attempt is finished either way, so the hint that produced it goes.
     {
       RenderLock lock(*this);
       WIFI_HINTS.forget(selectedSSID);
     }
+
+    if (progress == CancelProgress::Unrecoverable) {
+      // Nothing here may start another attempt. Fail this connection through the
+      // ordinary failure path instead: auto-connect moves on to the next saved network
+      // (or the manual list), and a user-initiated connect gets the usual failure
+      // screen, from which Confirm or Back offers a retry. Reuses the existing timeout
+      // string rather than adding one: the attempt did time out, and inventing an
+      // untranslated message for a rare device fault would be worse than reusing an
+      // accurate one.
+      connectionError = tr(STR_ERROR_CONNECTION_TIMEOUT);
+      WifiDiagLog::append("hint-cancel-abort: ssid=" + selectedSSID + " radio did not confirm stop, not retrying");
+      if (autoConnecting) {
+        handleAutoConnectFailure();
+        return;
+      }
+      state = WifiSelectionState::CONNECTION_FAILED;
+      requestUpdate();
+      return;
+    }
+
+    if (progress == CancelProgress::ConfirmedAfterRadioStop) {
+      // The escalation stopped and deinitialised the radio, so it has to be brought
+      // back up before anything can associate. Untouched on the ordinary
+      // event-confirmed path, which needs none of this.
+      prepareRadio();
+    }
+    beginConnection(/*useHint=*/false);
     return;
   }
 
