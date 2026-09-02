@@ -64,10 +64,30 @@ bool downloadedCoverIsPng(HalFile& file, const std::string& declaredType) {
 // healthy the heap looked when the caller's pre-loop check ran. Re-checking here, after
 // the download and before the decode, catches a heap that degraded during THIS cover's
 // own download rather than a previous one's.
-bool hasHeapForCoverDecode() {
-  constexpr uint32_t COVER_MIN_FREE_HEAP = 32 * 1024;
-  constexpr uint32_t COVER_MIN_FREE_BLOCK = 12 * 1024;
-  return ESP.getFreeHeap() > COVER_MIN_FREE_HEAP && ESP.getMaxAllocHeap() > COVER_MIN_FREE_BLOCK;
+bool hasHeapForCoverDecode(const bool isPng) {
+  // The JPEG decoder wants ~52KB of working buffers (JpegToBmpConverter's own
+  // MIN_FREE_HEAP), so the pre-gate has to be met before it is worth starting.
+  constexpr uint32_t JPEG_MIN_FREE_HEAP = 32 * 1024;
+  constexpr uint32_t JPEG_MIN_FREE_BLOCK = 12 * 1024;
+
+  // A PNG cover is a completely different proposition and must not be judged by the
+  // JPEG numbers. Core serves the e-ink derivative as a 160x240 1-bit PNG, whose whole
+  // decompressed payload is (160/8 + 1) * 240 = 5,040 bytes -- and PngToBmpConverter
+  // already falls back to a one-shot decode against the destination buffer when the
+  // 32KB streaming ring buffer cannot be allocated, needing no window at all (its own
+  // comment: "true for every OPDS cover -- the server caps these at 160x240, 1-bit").
+  //
+  // Judged by the JPEG thresholds, that 4KB decode was refused at 30,312 bytes free --
+  // 2,456 short of a limit sized for a decoder it never reaches. Every allocation on the
+  // PNG path is nothrow and null-checked, and the one-shot fallback is itself capped at
+  // 24,576 bytes, so an over-large PNG still fails cleanly rather than crashing. The
+  // pre-gate here only has to be generous enough not to start work that cannot finish.
+  constexpr uint32_t PNG_MIN_FREE_HEAP = 12 * 1024;
+  constexpr uint32_t PNG_MIN_FREE_BLOCK = 6 * 1024;
+
+  const uint32_t minFree = isPng ? PNG_MIN_FREE_HEAP : JPEG_MIN_FREE_HEAP;
+  const uint32_t minBlock = isPng ? PNG_MIN_FREE_BLOCK : JPEG_MIN_FREE_BLOCK;
+  return ESP.getFreeHeap() > minFree && ESP.getMaxAllocHeap() > minBlock;
 }
 }  // namespace
 
@@ -80,6 +100,11 @@ bool ensureOpdsCoverCached(const OpdsEntry& entry, const std::string& username, 
   if (entry.coverUrl.empty()) {
     return false;
   }
+
+  // Route CLASS, computed once. Nothing below logs the URL itself: a cover href is
+  // server-chosen and may carry signed query parameters, so only the classification
+  // (derivative vs full-size original) is ever written to serial or to the SD log.
+  const bool einkRoute = entry.coverUrl.find("/cover/eink") != std::string::npos;
 
   const std::string cachePath = getOpdsCoverCachePath(entry.id, width, height);
   if (Storage.exists(cachePath.c_str())) {
@@ -98,11 +123,24 @@ bool ensureOpdsCoverCached(const OpdsEntry& entry, const std::string& username, 
   const auto downloadResult =
       HttpDownloader::downloadToFile(entry.coverUrl, TEMP_PATH, nullptr, nullptr, username, password);
   if (downloadResult != HttpDownloader::OK) {
-    LOG_ERR("OPDSCOVER", "Failed to download cover: %s", entry.coverUrl.c_str());
+    LOG_ERR("OPDSCOVER", "Failed to download cover: route=%s", einkRoute ? "eink" : "full");
     return false;
   }
 
-  if (!hasHeapForCoverDecode()) {
+  // Opened and sniffed BEFORE the heap gate: what this decode costs depends entirely on
+  // the format, and judging a 4KB PNG by the JPEG decoder's requirements is what kept
+  // Core's e-ink derivative from ever being decoded.
+  HalFile src;
+  if (!Storage.openFileForRead("OPDSCOVER", TEMP_PATH, src)) {
+    Storage.remove(TEMP_PATH);
+    return false;
+  }
+  const bool isPng = downloadedCoverIsPng(src, entry.coverType);
+  LOG_INF("OPDSCOVER", "cover route=%s bytes=%u fmt=%s free=%u largest=%u", einkRoute ? "eink" : "full",
+          static_cast<unsigned>(src.fileSize()), isPng ? "png" : "jpeg", static_cast<unsigned>(ESP.getFreeHeap()),
+          static_cast<unsigned>(ESP.getMaxAllocHeap()));
+
+  if (!hasHeapForCoverDecode(isPng)) {
     // The download itself (HTTP/TLS buffers, chunked reads) can fragment the heap enough
     // to make the decode below -- or even the string work already ahead of it -- unsafe,
     // regardless of how healthy heap looked when the caller checked before starting this
@@ -119,25 +157,23 @@ bool ensureOpdsCoverCached(const OpdsEntry& entry, const std::string& username, 
     // this replaces allocated on the way to a logger that refuses to write below 32KB
     // free, i.e. it was most likely to be dropped exactly when it mattered.
     char line[224];
-    const int len = snprintf(
-        line, sizeof(line), "[OPDSCOVER] Skipping decode, low heap after download: free=%u largest=%u url=%s",
-        static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMaxAllocHeap()), entry.coverUrl.c_str());
+    const int len = snprintf(line, sizeof(line),
+                             "[OPDSCOVER] Skipping decode, low heap after download: free=%u largest=%u route=%s fmt=%s",
+                             static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMaxAllocHeap()),
+                             einkRoute ? "eink" : "full", isPng ? "png" : "jpeg");
     if (len > 0) {
       RollingSdLog::appendRaw(DebugLog::PATH, line, std::min<size_t>(static_cast<size_t>(len), sizeof(line) - 1),
                               DebugLog::MAX_LINES, /*force=*/true);
     }
-    Storage.remove(TEMP_PATH);
-    return false;
-  }
-
-  HalFile src;
-  if (!Storage.openFileForRead("OPDSCOVER", TEMP_PATH, src)) {
+    src.close();
     Storage.remove(TEMP_PATH);
     return false;
   }
 
   HalFile dst;
   if (!Storage.openFileForWrite("OPDSCOVER", cachePath, dst)) {
+    // Close before removing the path this handle still holds open.
+    src.close();
     Storage.remove(TEMP_PATH);
     return false;
   }
@@ -146,7 +182,6 @@ bool ensureOpdsCoverCached(const OpdsEntry& entry, const std::string& username, 
   // its own native size rather than padding/stretching it, so upscaling it again here would
   // just blur it for no benefit -- the draw call centers whatever (possibly smaller) size comes
   // out of this instead.
-  const bool isPng = downloadedCoverIsPng(src, entry.coverType);
   const bool success = isPng ? PngToBmpConverter::pngFileTo1BitBmpStreamWithSize(src, dst, width, height,
                                                                                  /*allowUpscale=*/false)
                              : JpegToBmpConverter::jpegFileTo1BitBmpStreamWithSize(src, dst, width, height);
@@ -157,7 +192,8 @@ bool ensureOpdsCoverCached(const OpdsEntry& entry, const std::string& username, 
   Storage.remove(TEMP_PATH);
 
   if (!success) {
-    LOG_ERR("OPDSCOVER", "Failed to convert cover to BMP: %s", entry.coverUrl.c_str());
+    LOG_ERR("OPDSCOVER", "Failed to convert cover to BMP: route=%s fmt=%s", einkRoute ? "eink" : "full",
+            isPng ? "png" : "jpeg");
     Storage.remove(cachePath.c_str());
   }
   return success;
