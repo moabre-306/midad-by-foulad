@@ -5,6 +5,7 @@
 // ip4_addr.h unless seen first. Pin this order; clang-format would otherwise sort
 // the local header last and break the build.
 #include "HttpDownloader.h"
+#include "HttpUrlParts.h"
 #include <Logging.h>
 #include <ReleaseJsonParser.h>
 #include <esp_ota_ops.h>
@@ -18,6 +19,42 @@
 #include <vector>
 
 #include "CrossPointSettings.h"
+
+namespace {
+// Host only -- never the path or query. A release asset URL is a signed, time-limited
+// CDN link, so logging it whole would put a credential in the serial log and on the SD
+// card. The host is what identifies the failing stage (api.github.com vs the CDN) and
+// carries nothing secret.
+std::string sanitizedHost(const std::string& url) {
+  HttpUrlParts parts;
+  if (!parseHttpUrl(url, parts) || parts.host.empty()) return "unparseable";
+  return parts.host;
+}
+
+// Turns HttpDownloader's last failure into "stage/detail" for one log line. The detail
+// is an HTTP status when the stage is STATUS, and an errno/internal code otherwise.
+const char* failStageName(const HttpDownloader::FailStage stage) {
+  switch (stage) {
+    case HttpDownloader::FailStage::NONE:
+      return "none";
+    case HttpDownloader::FailStage::CLIENT_INIT:
+      return "client-init";
+    case HttpDownloader::FailStage::OPEN:
+      return "open";
+    case HttpDownloader::FailStage::STATUS:
+      return "status";
+    case HttpDownloader::FailStage::READ:
+      return "read";
+    case HttpDownloader::FailStage::REDIRECT:
+      return "redirect";
+    case HttpDownloader::FailStage::BUFFER_OOM:
+      return "buffer-oom";
+    default:
+      return "other";
+  }
+}
+}  // namespace
+
 #include "FirmwareBoardTag.h"
 #include "FirmwareFlasher.h"
 
@@ -147,7 +184,10 @@ OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
   const bool ok = HttpDownloader::fetchUrl(url, feed, conditional);
 
   if (!ok) {
-    LOG_ERR("OTA", "Release check fetch failed");
+    const auto f = HttpDownloader::getLastFailure();
+    LOG_ERR("OTA", "update FAILED stage=metadata host=%s fail=%s detail=%d heap=%u block=%u",
+            sanitizedHost(url).c_str(), failStageName(f.stage), f.detail, static_cast<unsigned>(ESP.getFreeHeap()),
+            static_cast<unsigned>(ESP.getMaxAllocHeap()));
     return HTTP_ERROR;
   }
 
@@ -184,8 +224,8 @@ OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
   // a fully parsed response, so the cache never describes a release we couldn't read.
   saveCheckCache(prerelease, conditional.etag, latestVersion, otaUrl, otaSize);
 
-  LOG_DBG("OTA", "Found update: tag=%s size=%zu", latestVersion.c_str(), otaSize);
-  LOG_DBG("OTA", "Firmware URL: %s", otaUrl.c_str());
+  LOG_INF("OTA", "update available: tag=%s size=%zu host=%s", latestVersion.c_str(), otaSize,
+          sanitizedHost(otaUrl).c_str());
   return OK;
 }
 
@@ -292,7 +332,11 @@ OtaUpdater::OtaUpdaterError OtaUpdater::installUpdate(ProgressCallback onProgres
   }
 
   if (!fetchOk || !flashOk) {
-    LOG_ERR("OTA", "Firmware install failed (%s)", flashOk ? "download" : "flash write");
+    const auto f = HttpDownloader::getLastFailure();
+    LOG_ERR("OTA", "update FAILED stage=%s host=%s fail=%s detail=%d written=%u/%u heap=%u block=%u",
+            flashOk ? "asset-download" : "flash-write", sanitizedHost(otaUrl).c_str(), failStageName(f.stage), f.detail,
+            static_cast<unsigned>(processedSize), static_cast<unsigned>(otaSize),
+            static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMaxAllocHeap()));
     esp_ota_abort(otaHandle);
     return flashOk ? HTTP_ERROR : INTERNAL_UPDATE_ERROR;
   }
