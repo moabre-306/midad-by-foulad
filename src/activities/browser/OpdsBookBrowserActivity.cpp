@@ -839,10 +839,25 @@ OpdsBookBrowserActivity::GridLayout OpdsBookBrowserActivity::computeGridLayout()
 // Below the floor, covers are skipped and the placeholder icon is drawn. A grid with
 // grey boxes in it is a bad page; an abort is a lost session and a crash report. The
 // same trade is already made for the reading-stats snapshot in FouladDeviceTracking.
-static bool hasHeapForCoverWork() {
-  constexpr uint32_t COVER_MIN_FREE_HEAP = 32 * 1024;
-  constexpr uint32_t COVER_MIN_FREE_BLOCK = 12 * 1024;
-  return ESP.getFreeHeap() > COVER_MIN_FREE_HEAP && ESP.getMaxAllocHeap() > COVER_MIN_FREE_BLOCK;
+// Sized to the cover the entry actually advertises, mirroring
+// OpdsCoverCache::hasHeapForCoverDecode(). This is the PRE-LOOP gate: it runs before a
+// cover is requested, so judging an e-ink derivative by the JPEG decoder's appetite
+// stops the page before anything is fetched. Measured on an X3 with Core serving the
+// derivative: refused at largest=10,228 and 10,740 against a 12,288 floor, so
+// route=eink was never requested once and every tile drew a placeholder.
+//
+// A 160x240 1-bit PNG decompresses to ~5,040 bytes and PngToBmpConverter falls back to a
+// one-shot decode needing no 32KB window; the JPEG decoder still wants ~52KB. Unknown
+// type keeps the JPEG floor -- the conservative side is the one that cannot be decoded.
+static bool hasHeapForCoverWork(const bool isPng) {
+  constexpr uint32_t JPEG_MIN_FREE_HEAP = 32 * 1024;
+  constexpr uint32_t JPEG_MIN_FREE_BLOCK = 12 * 1024;
+  constexpr uint32_t PNG_MIN_FREE_HEAP = 12 * 1024;
+  constexpr uint32_t PNG_MIN_FREE_BLOCK = 6 * 1024;
+
+  const uint32_t minFree = isPng ? PNG_MIN_FREE_HEAP : JPEG_MIN_FREE_HEAP;
+  const uint32_t minBlock = isPng ? PNG_MIN_FREE_BLOCK : JPEG_MIN_FREE_BLOCK;
+  return ESP.getFreeHeap() > minFree && ESP.getMaxAllocHeap() > minBlock;
 }
 
 // Crash report from 1.8.40-rc: confirming a collection tile aborted with a BLANK panic
@@ -908,12 +923,19 @@ void OpdsBookBrowserActivity::loadGridPageCovers(const GridLayout& layout, const
         popupRect = GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
       }
       GUI.fillPopupProgress(renderer, popupRect, 10 + (processedCount * 90) / totalToProcess);
-      if (!hasHeapForCoverWork()) {
+      // The feed's declared type decides, plus the route as a fallback: Core marks the
+      // derivative link type="image/png", and a Library entry may carry no type at all
+      // (its cover resolves in two tiers, so naming the media type would cost a query
+      // per entry) -- in which case the /cover/eink route still identifies it.
+      const bool coverIsPng =
+          entry.coverType.find("png") != std::string::npos || entry.coverUrl.find("/cover/eink") != std::string::npos;
+      if (!hasHeapForCoverWork(coverIsPng)) {
         // Stop for this page rather than skipping one and trying the next: heap this
         // low does not recover within a loop, and each further attempt is another
         // chance to abort. The uncached covers stay uncached and are picked up on a
         // later visit, when the walk that fragmented the heap is behind us.
-        saveHeapGuardLog("Cover fetch stopped early at book %d/%d", i - pageStart + 1, totalToProcess);
+        saveHeapGuardLog("Cover fetch stopped early at book %d/%d (png=%d)", i - pageStart + 1, totalToProcess,
+                         coverIsPng ? 1 : 0);
         break;
       }
       if (!ensureOpdsCoverCached(entry, server.username, server.password, layout.coverWidth, layout.coverHeight)) {
