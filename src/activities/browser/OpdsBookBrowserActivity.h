@@ -213,6 +213,8 @@ class OpdsBookBrowserActivity final : public Activity {
   void navigateToEntry(const OpdsEntry& entry);
   void navigateBack();
   void downloadBook(const OpdsEntry& book);
+  // Frees the feed working set before a download. Returns MaxAlloc afterwards.
+  uint32_t releaseWorkingMemoryForDownload();
   void launchSearch();
   void performSearch(const std::string& query);
   // Only actually in-flight network work should block auto-sleep -- a page

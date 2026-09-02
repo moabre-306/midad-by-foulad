@@ -1161,7 +1161,49 @@ void OpdsBookBrowserActivity::navigateBack() {
   }
 }
 
-void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
+// Frees the feed working set before a transfer that needs one large contiguous
+// allocation. A book download runs with Wi-Fi necessarily UP, so the ~87KB the radio
+// holds is not reclaimable here (upstream #3343 is a separate, Home-side concern) --
+// what IS reclaimable is everything the browser accumulated while paging. Measured on
+// an X3: MaxAlloc 38,900 on a fresh connect vs 15,860 after browsing, both with the
+// radio up, so 23,040 bytes were lost to the browser's own working set. wolfSSL sizes
+// its receive buffer per TLS record and a 16KB record needs ~17,000 contiguous, which
+// is what a download at 15,860 fails on, mid-stream, with MEMORY_E.
+//
+// Deliberately NOT a Wi-Fi teardown/re-init: that adds delay and reconnection risk and
+// is not known to compact anything. Called "release", not "defragmentation" -- how much
+// contiguous memory it actually returns is the measurement, not the claim.
+uint32_t OpdsBookBrowserActivity::releaseWorkingMemoryForDownload() {
+  const uint32_t before = ESP.getMaxAllocHeap();
+  const uint32_t freeBefore = ESP.getFreeHeap();
+
+  // shrink_to_fit on each: clear() alone keeps the capacity, which is the whole point
+  // of doing this -- the bytes have to actually go back to the allocator.
+  entries.clear();
+  entries.shrink_to_fit();
+  navigationHistory.clear();
+  navigationHistory.shrink_to_fit();
+  searchTemplate.clear();
+  searchTemplate.shrink_to_fit();
+  feedNextUrl.clear();
+  feedNextUrl.shrink_to_fit();
+  feedPrevUrl.clear();
+  feedPrevUrl.shrink_to_fit();
+  errorMessage.clear();
+  errorMessage.shrink_to_fit();
+
+  const uint32_t after = ESP.getMaxAllocHeap();
+  LOG_INF("OPDS", "pre-download release: maxalloc %u -> %u (%+d), free %u -> %u", static_cast<unsigned>(before),
+          static_cast<unsigned>(after), static_cast<int>(after) - static_cast<int>(before),
+          static_cast<unsigned>(freeBefore), static_cast<unsigned>(ESP.getFreeHeap()));
+  return after;
+}
+
+void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& bookRef) {
+  // Owned copy FIRST: bookRef points into `entries`, which the release below frees.
+  // One entry is the minimum the rest of this function needs (href, title, author,
+  // acquisitionType, coverUrl, coverType, and the whole entry for tagFouladBookId).
+  const OpdsEntry book = bookRef;
   // Extension/folder/replace policy is Foulad eBooks catalog-specific (XTC-only
   // books, News' own folder and replace-not-accumulate rule) -- see FouladOpdsHooks.h.
   const std::string extension = FouladOpdsHooks::acquisitionExtension(book.acquisitionType);
@@ -1199,9 +1241,16 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
   // refresh on every single 2KB HTTP chunk, making a multi-MB book look stuck for minutes).
   constexpr size_t UNKNOWN_TOTAL_REDRAW_STEP = 32 * 1024;
 
+  releaseWorkingMemoryForDownload();
+  uint32_t minMaxAllocDuring = ESP.getMaxAllocHeap();
+
   const auto result = HttpDownloader::downloadToFile(
       downloadUrl, filename,
-      [this](const size_t downloaded, const size_t total) {
+      [this, &minMaxAllocDuring](const size_t downloaded, const size_t total) {
+        // Sampled on every callback, not only on a redraw: the point is the floor the
+        // transfer actually reaches, and the redraw throttle would hide it.
+        const uint32_t nowMaxAlloc = ESP.getMaxAllocHeap();
+        if (nowMaxAlloc < minMaxAllocDuring) minMaxAllocDuring = nowMaxAlloc;
         downloadProgress = downloaded;
         downloadTotal = total;
         if (total > 0) {
@@ -1215,6 +1264,10 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
         requestUpdate(true);
       },
       nullptr, server.username, server.password);
+
+  LOG_INF("OPDS", "download %s: bytes=%u minMaxAllocDuring=%u free=%u", result == HttpDownloader::OK ? "ok" : "FAILED",
+          static_cast<unsigned>(downloadProgress), static_cast<unsigned>(minMaxAllocDuring),
+          static_cast<unsigned>(ESP.getFreeHeap()));
 
   if (result == HttpDownloader::OK) {
     clearBookCache(filename);
@@ -1240,9 +1293,12 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
     activityManager.goToReader(filename);
     return;
   }
+  // The feed was released above, so the browser has nothing to draw. Reload it rather
+  // than showing an empty list behind the error; Back then returns to a real page.
   state = BrowserState::ERROR;
   errorMessage = tr(STR_DOWNLOAD_FAILED);
   requestUpdate();
+  fetchFeed(currentPath);
 }
 
 void OpdsBookBrowserActivity::launchSearch() {
