@@ -638,8 +638,57 @@ bool wolfStreamChunked(VerifiedTlsSession& tls, Sink& sink, uint8_t* buf, const 
   }
 }
 
+// --- Ranged download ------------------------------------------------------
+//
+// A whole-file GET fails mid-stream on this device. Measured: a book download died at
+// 49% with wolfSSL MEMORY_E, and the instrumented run showed why -- MaxAlloc was 10,740
+// when the transfer started and 3,444 at its lowest DURING it. The transfer itself
+// erodes the contiguous block, so no amount of freeing beforehand can rescue it, and
+// wolfSSL sizes its receive buffer to whatever record arrives.
+//
+// So the response is bounded at the source instead of hoping the peer negotiates a
+// small record: each request asks for RANGE_CHUNK_BYTES and nothing larger can come
+// back. A 206 and a well-formed Content-Range are REQUIRED -- a server that answers 200
+// would stream the whole body and put us back where we started, so that is a failure
+// here, not a fallback.
+//
+// Bytes land in a temp file and the destination is only created by rename() once the
+// byte count matches the total the server declared. A partial download therefore never
+// appears as a book.
+constexpr size_t RANGE_CHUNK_BYTES = 4096;
+constexpr int RANGE_MAX_CHUNK_RETRIES = 2;
+
+// Parses "bytes <start>-<end>/<total>". Returns false on any shape that is not exactly
+// that, including "*" totals -- an unknown total cannot be validated against.
+bool parseContentRange(const std::string& value, size_t& outStart, size_t& outEnd, size_t& outTotal) {
+  const char* p = value.c_str();
+  while (*p == ' ') p++;
+  if (strncasecmp(p, "bytes", 5) != 0) return false;
+  p += 5;
+  while (*p == ' ') p++;
+  char* end = nullptr;
+  const unsigned long start = strtoul(p, &end, 10);
+  if (end == p || *end != '-') return false;
+  p = end + 1;
+  const unsigned long last = strtoul(p, &end, 10);
+  if (end == p || *end != '/') return false;
+  p = end + 1;
+  if (*p == '*') return false;
+  const unsigned long total = strtoul(p, &end, 10);
+  if (end == p || total == 0 || last < start || last >= total) return false;
+  outStart = start;
+  outEnd = last;
+  outTotal = total;
+  return true;
+}
+
+// rangeHeader, when non-null, is sent as `Range:` and makes a 206 with a well-formed
+// Content-Range MANDATORY -- a 200 means the peer ignored the range and would stream the
+// whole body, which is the exact failure this exists to prevent, so it is refused.
 HttpDownloader::DownloadError runGetVerified(const std::string& startUrl, const std::string& username,
-                                             const std::string& password, Sink& sink, const char* anchorsPem) {
+                                             const std::string& password, Sink& sink, const char* anchorsPem,
+                                             const char* rangeHeader = nullptr, size_t* outRangeStart = nullptr,
+                                             size_t* outRangeEnd = nullptr, size_t* outRangeTotal = nullptr) {
   setLastFailure(HttpDownloader::FailStage::NONE, 0);
   WifiPowerSaveGuard psGuard;
 
@@ -745,6 +794,11 @@ HttpDownloader::DownloadError runGetVerified(const std::string& startUrl, const 
         if (!serial.empty()) request += "X-Device-Serial: " + serial + "\r\n";
       }
     }
+    if (rangeHeader != nullptr) {
+      request += "Range: ";
+      request += rangeHeader;
+      request += "\r\n";
+    }
     request += keepAlive ? "Connection: keep-alive\r\n\r\n" : "Connection: close\r\n\r\n";
 
     if (tls->write(reinterpret_cast<const uint8_t*>(request.data()), request.size()) < 0) {
@@ -785,6 +839,7 @@ HttpDownloader::DownloadError runGetVerified(const std::string& startUrl, const 
     const int status = atoi(line.c_str() + 9);
 
     std::string location;
+    std::string contentRange;
     size_t contentLength = 0;
     bool haveContentLength = false;
     bool chunked = false;
@@ -799,6 +854,8 @@ HttpDownloader::DownloadError runGetVerified(const std::string& startUrl, const 
       if (strcasecmp(name.c_str(), "content-length") == 0) {
         contentLength = static_cast<size_t>(strtoul(value.c_str(), nullptr, 10));
         haveContentLength = true;
+      } else if (strcasecmp(name.c_str(), "content-range") == 0) {
+        contentRange = value;
       } else if (strcasecmp(name.c_str(), "location") == 0) {
         location = value;
       } else if (strcasecmp(name.c_str(), "transfer-encoding") == 0) {
@@ -853,7 +910,24 @@ HttpDownloader::DownloadError runGetVerified(const std::string& startUrl, const 
       continue;
     }
 
-    if (status != 200) {
+    if (rangeHeader != nullptr) {
+      if (status != 206) {
+        LOG_ERR("HTTP", "ranged request answered %d, not 206", status);
+        setLastFailure(HttpDownloader::FailStage::STATUS, status);
+        if (keepAlive) dropKeepAliveVerified();
+        return HttpDownloader::HTTP_ERROR;
+      }
+      size_t rs = 0, re = 0, rt = 0;
+      if (!parseContentRange(contentRange, rs, re, rt)) {
+        LOG_ERR("HTTP", "ranged request: unusable Content-Range");
+        setLastFailure(HttpDownloader::FailStage::STATUS, status);
+        if (keepAlive) dropKeepAliveVerified();
+        return HttpDownloader::HTTP_ERROR;
+      }
+      if (outRangeStart) *outRangeStart = rs;
+      if (outRangeEnd) *outRangeEnd = re;
+      if (outRangeTotal) *outRangeTotal = rt;
+    } else if (status != 200) {
       LOG_DBG("HTTP", "verified GET non-200 status: %d", status);
       setLastFailure(HttpDownloader::FailStage::STATUS, status);
       if (keepAlive && !haveContentLength && !chunked) dropKeepAliveVerified();
@@ -1573,6 +1647,108 @@ HttpDownloader::DownloadError runPostJson(const std::string& url, const std::str
 // speaks TLS 1.3 and reads large bodies from servers where the esp_http_client/
 // mbedTLS path fails to connect or stalls mid-stream. Plain-http URLs still use a
 // WiFiClient inside runGetWolf, so this is safe for non-TLS targets too.
+// Downloads `url` to `destPath` in RANGE_CHUNK_BYTES pieces over one verified session.
+// Every response is bounded by the range we asked for, so no single TLS record can grow
+// past it. Returns OK only after the written byte count matches the server's declared
+// total and the temp file has been renamed into place.
+HttpDownloader::DownloadError runDownloadRangedVerified(const std::string& url, const std::string& username,
+                                                        const std::string& password, const std::string& destPath,
+                                                        const HttpDownloader::ProgressCallback& progress,
+                                                        bool* cancelFlag, const char* anchorsPem) {
+  const std::string tmpPath = destPath + ".part";
+  Storage.remove(tmpPath.c_str());
+
+  // One chunk staged in RAM, then appended only once the slice has been validated. The
+  // file therefore never holds bytes from a failed attempt, which matters because
+  // HalStorage has no truncate() to roll one back.
+  auto chunk = makeUniqueNoThrow<uint8_t[]>(RANGE_CHUNK_BYTES);
+  if (!chunk) {
+    LOG_ERR("HTTP", "ranged: OOM staging %u bytes", static_cast<unsigned>(RANGE_CHUNK_BYTES));
+    return HttpDownloader::HTTP_ERROR;
+  }
+
+  // One scope for the whole file: every chunk rides the session the first one opened,
+  // otherwise a 450KB book would pay ~110 handshakes.
+  const HttpDownloader::KeepAliveScope rangeSession;
+
+  size_t offset = 0;
+  size_t total = 0;
+  bool haveTotal = false;
+  uint32_t minMaxAlloc = ESP.getMaxAllocHeap();
+
+  while (!haveTotal || offset < total) {
+    if (cancelFlag && *cancelFlag) {
+      Storage.remove(tmpPath.c_str());
+      return HttpDownloader::ABORTED;
+    }
+
+    char rangeHeader[64];
+    snprintf(rangeHeader, sizeof(rangeHeader), "bytes=%u-%u", static_cast<unsigned>(offset),
+             static_cast<unsigned>(offset + RANGE_CHUNK_BYTES - 1));
+
+    size_t staged = 0;
+    size_t cStart = 0, cEnd = 0, cTotal = 0;
+    HttpDownloader::DownloadError r = HttpDownloader::HTTP_ERROR;
+
+    for (int attempt = 0; attempt <= RANGE_MAX_CHUNK_RETRIES; ++attempt) {
+      staged = 0;
+      Sink sink;
+      sink.write = [&chunk, &staged](const uint8_t* data, const size_t len) {
+        if (staged + len > RANGE_CHUNK_BYTES) return false;  // more than we asked for
+        memcpy(chunk.get() + staged, data, len);
+        staged += len;
+        return true;
+      };
+      r = runGetVerified(url, username, password, sink, anchorsPem, rangeHeader, &cStart, &cEnd, &cTotal);
+      if (r == HttpDownloader::OK) break;
+    }
+
+    if (r != HttpDownloader::OK) {
+      LOG_ERR("HTTP", "ranged: chunk at %u failed after retries", static_cast<unsigned>(offset));
+      Storage.remove(tmpPath.c_str());
+      return r;
+    }
+    if (cStart != offset || staged != cEnd - cStart + 1) {
+      LOG_ERR("HTTP", "ranged: wrong slice (want %u, got %u..%u, %u bytes)", static_cast<unsigned>(offset),
+              static_cast<unsigned>(cStart), static_cast<unsigned>(cEnd), static_cast<unsigned>(staged));
+      Storage.remove(tmpPath.c_str());
+      return HttpDownloader::HTTP_ERROR;
+    }
+    if (haveTotal && cTotal != total) {
+      LOG_ERR("HTTP", "ranged: total changed mid-download");
+      Storage.remove(tmpPath.c_str());
+      return HttpDownloader::HTTP_ERROR;
+    }
+    total = cTotal;
+    haveTotal = true;
+
+    HalFile out = Storage.open(tmpPath.c_str(), O_WRITE | O_CREAT | O_APPEND);
+    if (!out || out.write(chunk.get(), staged) != staged) {
+      LOG_ERR("HTTP", "ranged: temp write failed at %u", static_cast<unsigned>(offset));
+      Storage.remove(tmpPath.c_str());
+      return HttpDownloader::FILE_ERROR;
+    }
+    out.close();
+
+    offset += staged;
+    const uint32_t nowMaxAlloc = ESP.getMaxAllocHeap();
+    if (nowMaxAlloc < minMaxAlloc) minMaxAlloc = nowMaxAlloc;
+    if (progress) progress(offset, total);
+  }
+
+  // Only now does the destination exist. Anything short never gets the name.
+  Storage.remove(destPath.c_str());
+  if (!Storage.rename(tmpPath.c_str(), destPath.c_str())) {
+    LOG_ERR("HTTP", "ranged: rename failed");
+    Storage.remove(tmpPath.c_str());
+    return HttpDownloader::FILE_ERROR;
+  }
+  LOG_INF("HTTP", "ranged ok: %u bytes / %u chunks, minMaxAllocDuring=%u", static_cast<unsigned>(total),
+          static_cast<unsigned>((total + RANGE_CHUNK_BYTES - 1) / RANGE_CHUNK_BYTES),
+          static_cast<unsigned>(minMaxAlloc));
+  return HttpDownloader::OK;
+}
+
 HttpDownloader::DownloadError runGetSecure(const std::string& url, const std::string& username,
                                            const std::string& password, Sink& sink) {
 #if defined(FREEINK_NET_WOLFSSL)
@@ -1677,6 +1853,19 @@ HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& 
                                                              ProgressCallback progress, bool* cancelFlag,
                                                              const std::string& username, const std::string& password) {
   LOG_DBG("HTTP", "Downloading: %s -> %s", url.c_str(), destPath.c_str());
+
+#if defined(FREEINK_NET_WOLFSSL)
+  // Midad Core downloads go out in bounded ranges. A whole-file GET died at 49% with
+  // MEMORY_E because the transfer itself erodes the contiguous block (MaxAlloc 10,740 at
+  // the start, 3,444 at its lowest during), and wolfSSL sizes its receive buffer to
+  // whatever record arrives -- so the response is capped at the request instead.
+  // Third-party hosts keep the streaming path: they are not guaranteed to honour Range,
+  // and a 200 there is normal rather than a failure.
+  if (isFouladEbooksUrl(url)) {
+    return runDownloadRangedVerified(url, username, password, destPath, progress, cancelFlag,
+                                     core_ca::kMidadCoreCaGtsRootR4);
+  }
+#endif
 
   if (Storage.exists(destPath.c_str())) {
     Storage.remove(destPath.c_str());
