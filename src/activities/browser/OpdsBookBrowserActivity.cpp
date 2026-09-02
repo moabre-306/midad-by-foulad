@@ -936,6 +936,31 @@ void OpdsBookBrowserActivity::loadGridPageCovers(const GridLayout& layout, const
 
 void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
   loadedGridPageStart = NO_GRID_PAGE_LOADED;
+
+  // Free the PREVIOUS feed before fetching and parsing the next one.
+  //
+  // `entries = std::move(*parser).getEntries()` below only destroys the old vector at
+  // the assignment, i.e. after the parser has already built the whole new one -- so the
+  // peak is old entries + parser + new entries, every level down. On an X3 that showed
+  // as MaxAlloc falling 38,900 -> 26,612 -> 13,300 -> 10,228 across just three feeds
+  // (root, /store/lang/ar, .../books) with free heap still a healthy ~36KB: pure
+  // fragmentation, and low enough that the cover loop then refused at book 1 of 6 and
+  // no cover was ever requested.
+  //
+  // Only the feed BODY goes. navigationHistory is a vector of path strings and
+  // currentPath is one string -- Back rebuilds a level by re-fetching it, which is what
+  // the history is for, so there is nothing heavier worth keeping.
+  const uint32_t navMaxAllocBefore = ESP.getMaxAllocHeap();
+  entries.clear();
+  entries.shrink_to_fit();
+  feedNextUrl.clear();
+  feedNextUrl.shrink_to_fit();
+  feedPrevUrl.clear();
+  feedPrevUrl.shrink_to_fit();
+  LOG_INF("OPDS", "feed release: maxalloc %u -> %u (%+d), free=%u", static_cast<unsigned>(navMaxAllocBefore),
+          static_cast<unsigned>(ESP.getMaxAllocHeap()),
+          static_cast<int>(ESP.getMaxAllocHeap()) - static_cast<int>(navMaxAllocBefore),
+          static_cast<unsigned>(ESP.getFreeHeap()));
   // Consume the auto-advance landing hint up front so a failed fetch can't
   // leave it armed for a later, unrelated navigation.
   const PendingGridSelect pendingSelect = pendingGridSelect;
@@ -1051,6 +1076,8 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
   feedNextUrl = parser->getNextPageUrl();
   feedPrevUrl = parser->getPrevPageUrl();
   entries = std::move(*parser).getEntries();
+  LOG_INF("OPDS", "feed loaded: entries=%u maxalloc=%u free=%u", static_cast<unsigned>(entries.size()),
+          static_cast<unsigned>(ESP.getMaxAllocHeap()), static_cast<unsigned>(ESP.getFreeHeap()));
 
   // Whether the FEED was empty, captured before the synthetic rows go in. The empty
   // state has to be decided on what the server actually sent: a page carrying only a
