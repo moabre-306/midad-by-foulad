@@ -1861,7 +1861,13 @@ HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& 
   // whatever record arrives -- so the response is capped at the request instead.
   // Third-party hosts keep the streaming path: they are not guaranteed to honour Range,
   // and a 200 there is normal rather than a failure.
-  if (isFouladEbooksUrl(url)) {
+  // Book acquisitions only. Core's cover route serves the object body with a plain 200
+  // and implements no Range at all, so sending one there makes every cover fail the
+  // mandatory-206 check -- measured as 18 refusals and 6 lost covers. Covers are ~4KB
+  // and were never the problem: a single response that size cannot produce the oversized
+  // record this exists to prevent.
+  const bool isCoverUrl = url.find("/cover") != std::string::npos;
+  if (isFouladEbooksUrl(url) && !isCoverUrl) {
     return runDownloadRangedVerified(url, username, password, destPath, progress, cancelFlag,
                                      core_ca::kMidadCoreCaGtsRootR4);
   }
