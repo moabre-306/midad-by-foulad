@@ -1819,6 +1819,22 @@ bool HttpDownloader::fetchUrl(const std::string& url, const DataCallback& onData
   return runGetSecure(url, username, password, sink) == OK;
 }
 
+bool HttpDownloader::fetchUrlPinned(const std::string& url, const DataCallback& onData, const char* anchorsPem) {
+#if defined(FREEINK_NET_WOLFSSL)
+  Sink sink;
+  sink.write = onData;
+  // runGetVerified refuses a non-https URL and every non-https redirect target
+  // itself, and never forwards credentials once the chain leaves its start origin.
+  return runGetVerified(url, "", "", sink, anchorsPem) == OK;
+#else
+  (void)url;
+  (void)onData;
+  (void)anchorsPem;
+  LOG_ERR("HTTP", "pinned fetch needs the wolfSSL stack");
+  return false;
+#endif
+}
+
 bool HttpDownloader::fetchUrlVerified(const std::string& url, const DataCallback& onData, const std::string& username,
                                       const std::string& password) {
   // "Verified" means TLS too, not just certificate-chain checking once connected --

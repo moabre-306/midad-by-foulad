@@ -128,6 +128,13 @@ class HttpDownloader {
    * OTA firmware downloads, which don't need wolfSSL's TLS 1.3 support since
    * GitHub's release CDN doesn't require it.
    */
+  /**
+   * Verified GET against an explicit PEM trust anchor set: chain built to one of
+   * those anchors and the certificate must name the host. https:// only. Used for
+   * release metadata, where the response decides which firmware gets installed.
+   */
+  static bool fetchUrlPinned(const std::string& url, const DataCallback& onData, const char* anchorsPem);
+
   static bool fetchUrlVerified(const std::string& url, const DataCallback& onData, const std::string& username = "",
                                const std::string& password = "");
 

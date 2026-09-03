@@ -5,7 +5,9 @@
 // ip4_addr.h unless seen first. Pin this order; clang-format would otherwise sort
 // the local header last and break the build.
 #include "HttpDownloader.h"
+#include "GithubCaCerts.h"
 #include "HttpUrlParts.h"
+#include <mbedtls/sha256.h>
 #include <Logging.h>
 #include <ReleaseJsonParser.h>
 #include <esp_ota_ops.h>
@@ -33,6 +35,30 @@ std::string sanitizedHost(const std::string& url) {
 
 // Turns HttpDownloader's last failure into "stage/detail" for one log line. The detail
 // is an HTTP status when the stage is STATUS, and an errno/internal code otherwise.
+// Accepts exactly "sha256:" + 64 lowercase-or-uppercase hex, nothing else. Anything
+// shorter, longer, differently prefixed or non-hex is refused rather than repaired:
+// an unparseable digest must fail closed, not fall through to an install.
+bool parseSha256Digest(const std::string& digest, uint8_t out[32]) {
+  constexpr char kPrefix[] = "sha256:";
+  constexpr size_t kPrefixLen = sizeof(kPrefix) - 1;
+  if (digest.size() != kPrefixLen + 64) return false;
+  if (strncasecmp(digest.c_str(), kPrefix, kPrefixLen) != 0) return false;
+  for (size_t i = 0; i < 32; ++i) {
+    const char hi = digest[kPrefixLen + i * 2];
+    const char lo = digest[kPrefixLen + i * 2 + 1];
+    const auto nib = [](const char c) -> int {
+      if (c >= '0' && c <= '9') return c - '0';
+      if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+      if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+      return -1;
+    };
+    const int h = nib(hi), l = nib(lo);
+    if (h < 0 || l < 0) return false;
+    out[i] = static_cast<uint8_t>((h << 4) | l);
+  }
+  return true;
+}
+
 const char* failStageName(const HttpDownloader::FailStage stage) {
   switch (stage) {
     case HttpDownloader::FailStage::NONE:
@@ -181,7 +207,15 @@ OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
     return true;
   };
 
-  const bool ok = HttpDownloader::fetchUrl(url, feed, conditional);
+  // Release metadata decides WHICH image gets installed, so it runs pinned and
+  // hostname-verified against the measured Sectigo ECDSA root (GithubCaCerts.h).
+  // The conditional/ETag path is given up deliberately: it only exists on the
+  // esp_http_client transport, which aborts rather than erroring when it cannot
+  // allocate (http_utils.c:72 asserts on a failed realloc, observed killing this
+  // device mid-check). A re-fetched JSON body is a cheap price for a path that
+  // fails gracefully.
+  const bool ok = HttpDownloader::fetchUrlPinned(url, feed, github_ca::kGithubApiCaAnchors);
+  conditional.notModified = false;
 
   if (!ok) {
     const auto f = HttpDownloader::getLastFailure();
@@ -196,6 +230,11 @@ OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
     latestVersion = cache.tag;
     otaUrl = cache.url;
     otaSize = cache.size;
+    // The on-disk cache predates the digest and cannot supply one. Cleared rather
+    // than left stale: a stale digest belongs to a different asset, and
+    // installUpdate() must refuse an asset it cannot authenticate. Unreachable while
+    // the pinned fetch above forces notModified = false, kept correct regardless.
+    otaDigest.clear();
     totalSize = otaSize;
     updateAvailable = true;
     return OK;
@@ -217,6 +256,7 @@ OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
   latestVersion = releaseParser.getTagName();
   otaUrl = releaseParser.getFirmwareUrl();
   otaSize = releaseParser.getFirmwareSize();
+  otaDigest = releaseParser.getFirmwareDigest();
   totalSize = otaSize;
   updateAvailable = true;
 
@@ -282,7 +322,35 @@ OtaUpdater::OtaUpdaterError OtaUpdater::installUpdate(ProgressCallback onProgres
   // the inactive OTA slot, but esp_ota_abort() below means it never becomes
   // the boot target.
   board_tag::Scanner tagScanner;
-  const bool fetchOk = HttpDownloader::fetchUrlVerified(otaUrl, [&](const uint8_t* data, size_t len) {
+  // The asset host (objects.githubusercontent.com) chains to an RSA root, and an
+  // RSA modexp is what exhausted this device once already (0x4290 =
+  // RSA_PUBLIC_FAILED + MPI_ALLOC_FAILED). So the CDN is NOT pinned; the asset is
+  // authenticated by the SHA-256 digest that the pinned metadata channel above
+  // delivered. Transport stays https-only and bounded.
+  if (otaDigest.empty()) {
+    LOG_ERR("OTA", "update FAILED stage=digest-missing host=%s -- refusing unauthenticated asset",
+            sanitizedHost(otaUrl).c_str());
+    esp_ota_abort(otaHandle);
+    return HTTP_ERROR;
+  }
+  uint8_t expectedDigest[32];
+  if (!parseSha256Digest(otaDigest, expectedDigest)) {
+    LOG_ERR("OTA", "update FAILED stage=digest-malformed host=%s", sanitizedHost(otaUrl).c_str());
+    esp_ota_abort(otaHandle);
+    return HTTP_ERROR;
+  }
+  if (strncasecmp(otaUrl.c_str(), "https://", 8) != 0) {
+    LOG_ERR("OTA", "update FAILED stage=asset-scheme host=%s", sanitizedHost(otaUrl).c_str());
+    esp_ota_abort(otaHandle);
+    return HTTP_ERROR;
+  }
+
+  mbedtls_sha256_context sha;
+  mbedtls_sha256_init(&sha);
+  mbedtls_sha256_starts(&sha, 0);
+
+  const bool fetchOk = HttpDownloader::fetchUrl(otaUrl, [&](const uint8_t* data, size_t len) {
+    mbedtls_sha256_update(&sha, data, len);
     if (hdrLen < sizeof(hdr)) {
       const size_t take = std::min(len, sizeof(hdr) - hdrLen);
       std::memcpy(hdr + hdrLen, data, take);
@@ -337,8 +405,34 @@ OtaUpdater::OtaUpdaterError OtaUpdater::installUpdate(ProgressCallback onProgres
             flashOk ? "asset-download" : "flash-write", sanitizedHost(otaUrl).c_str(), failStageName(f.stage), f.detail,
             static_cast<unsigned>(processedSize), static_cast<unsigned>(otaSize),
             static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMaxAllocHeap()));
+    mbedtls_sha256_free(&sha);
     esp_ota_abort(otaHandle);
     return flashOk ? HTTP_ERROR : INTERNAL_UPDATE_ERROR;
+  }
+
+  // Authenticity gate, before esp_ota_end() and before any boot-partition change.
+  // esp_ota_end() and the chip/board checks prove the image is intact and belongs on
+  // this device; only this digest -- delivered over the pinned, hostname-verified
+  // metadata channel -- proves it is the image GitHub actually published.
+  {
+    uint8_t actualDigest[32];
+    mbedtls_sha256_finish(&sha, actualDigest);
+    mbedtls_sha256_free(&sha);
+
+    if (processedSize != otaSize) {
+      LOG_ERR("OTA", "update FAILED stage=size-mismatch got=%u want=%u host=%s", static_cast<unsigned>(processedSize),
+              static_cast<unsigned>(otaSize), sanitizedHost(otaUrl).c_str());
+      esp_ota_abort(otaHandle);
+      return HTTP_ERROR;
+    }
+    if (memcmp(actualDigest, expectedDigest, sizeof(actualDigest)) != 0) {
+      LOG_ERR("OTA", "update FAILED stage=digest-mismatch host=%s bytes=%u", sanitizedHost(otaUrl).c_str(),
+              static_cast<unsigned>(processedSize));
+      esp_ota_abort(otaHandle);
+      return HTTP_ERROR;
+    }
+    LOG_INF("OTA", "asset authenticated: %u bytes, sha256 matches release metadata",
+            static_cast<unsigned>(processedSize));
   }
 
   esp_err = esp_ota_end(otaHandle);  // verifies the written image

@@ -33,6 +33,11 @@ class ReleaseJsonParser {
   const char* getTagName() const;
   const char* getFirmwareUrl() const;
   size_t getFirmwareSize() const;
+  // The asset's "digest" field, verbatim, e.g. "sha256:<64 hex>". Empty when the
+  // release metadata carried none -- callers MUST fail closed on that, since this
+  // digest is the only thing that authenticates an asset fetched over a CDN we do
+  // not pin.
+  const char* getFirmwareDigest() const;
 
  private:
   enum class Position : uint8_t {
@@ -48,6 +53,7 @@ class ReleaseJsonParser {
     ASSET_NAME,
     ASSET_URL,
     ASSET_SIZE,
+    ASSET_DIGEST,
   };
 
   static void sOnKey(void* ctx, const char* key, size_t len);
@@ -78,12 +84,15 @@ class ReleaseJsonParser {
   char tagName[32];
   char firmwareUrl[512];
   size_t firmwareSize;
+  // "sha256:" + 64 hex + NUL
+  char firmwareDigest[80];
   bool tagFound;
   bool firmwareFound;
 
   char currentAssetName[32];
   char currentAssetUrl[512];
   size_t currentAssetSize;
+  char currentAssetDigest[80];
 
   char firmwareAssetName[32];
 };

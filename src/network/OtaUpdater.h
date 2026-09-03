@@ -9,6 +9,9 @@ class OtaUpdater {
   std::string latestVersion;
   std::string otaUrl;
   size_t otaSize = 0;
+  // "sha256:<64 hex>" from the release metadata. Empty means the asset cannot be
+  // authenticated, and installUpdate() refuses rather than installing it.
+  std::string otaDigest;
   size_t processedSize = 0;
   size_t totalSize = 0;
 
