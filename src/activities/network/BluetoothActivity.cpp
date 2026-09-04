@@ -280,8 +280,13 @@ void BluetoothActivity::render(RenderLock&&) {
       secondHintText = tr(STR_BLUETOOTH_RESTART_HINT);
       break;
   }
-  renderer.drawCenteredText(UI_12_FONT_ID, nextY, statusText, true, EpdFontFamily::BOLD);
-  nextY += renderer.getLineHeight(UI_12_FONT_ID) + 8;
+  // Wrapped, not centred-and-clipped: these are sentences now, not one-word
+  // states. "Bluetooth stopped so Wi-Fi can stay connected" ran off both edges of
+  // the panel when drawn unwrapped, which is the same way the sign-out
+  // confirmation used to fail.
+  nextY +=
+      renderer.drawCenteredTextWrapped(UI_12_FONT_ID, nextY, pageWidth - 40, statusText, 2, true, EpdFontFamily::BOLD);
+  nextY += 8;
 
 #ifndef SIMULATOR
   // What the PHONE just asked this device to do. Without it the reader shows only

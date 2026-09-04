@@ -618,6 +618,12 @@ void CrossPointWebServer::handleFileList() const {
   sendHtmlContent(server.get(), FilesPageHtml, sizeof(FilesPageHtml));
 }
 
+// Floor below which a listing stops rather than continuing toward the point where
+// the device stops answering entirely. Chosen above the 1,248 bytes a real root
+// listing was measured bottoming at, with room for the response still to be
+// written and the connection closed cleanly.
+constexpr uint32_t LISTING_MIN_FREE_HEAP = 6144;
+
 void CrossPointWebServer::handleFileListData() const {
   // Get current path from query string (default to root)
   String currentPath = "/";
@@ -633,8 +639,24 @@ void CrossPointWebServer::handleFileListData() const {
     }
   }
 
+  // Opt-in envelope. Without it the body is the bare array it has always been, so
+  // the built-in Files page is untouched; with it the answer carries its own
+  // trustworthiness.
+  //
+  // This exists because an abandoned listing was INVISIBLE: the array was still
+  // closed correctly, so a caller received valid, well-formed JSON that was simply
+  // short, and could not tell "this directory has four files" from "we gave up
+  // after four". A count nobody measured, presented as though somebody had.
+  //
+  // The flag rides the same body rather than a second /api/status read: it is
+  // atomic (the answer and its trustworthiness arrive together), it costs no extra
+  // request on a path with ~21KB to spare, and it cannot be misattributed the way
+  // a shared "last listing" field could when two callers overlap.
+  const bool envelope = server->hasArg("envelope");
+
   server->setContentLength(CONTENT_LENGTH_UNKNOWN);
   server->send(200, "application/json", "");
+  if (envelope) server->sendContent("{\"entries\":", 11);
   server->sendContent("[", 1);
 
   // Deliberately allocation-free per entry.
@@ -649,6 +671,11 @@ void CrossPointWebServer::handleFileListData() const {
   // snprintf and nothing else.
   char output[512];
   size_t entries = 0;
+  // Which of the three real abandon paths fired, if any. Deliberately three
+  // distinct causes rather than one "failed": running out of memory and a peer
+  // that stopped reading need different sentences from whoever shows this.
+  const char* abortReason = nullptr;
+  uint32_t abortFreeHeap = 0;
   bool seenFirst = false;
   const unsigned long listingStart = millis();
   // A stalled-but-connected peer blocks sendContent() for up to 10 s per call
@@ -656,55 +683,81 @@ void CrossPointWebServer::handleFileListData() const {
   // configurable), so bound the whole listing rather than trusting each write.
   constexpr unsigned long LISTING_BUDGET_MS = 8000;
 
-  scanFiles(currentPath.c_str(), [this, &output, &entries, &seenFirst, listingStart](const FileInfo& info) {
-    if (!server->client().connected()) {
-      LOG_DBG("WEB", "Client gone after %u entries; abandoning listing", (unsigned)entries);
-      return false;
-    }
-    if (millis() - listingStart > LISTING_BUDGET_MS) {
-      LOG_ERR("WEB", "Listing stalled after %u entries (%lu ms); client not reading, abandoning", (unsigned)entries,
-              millis() - listingStart);
-      return false;
-    }
-    if ((entries & 0x0F) == 0) {
-      LOG_DBG("WEB", "listing entry %u, free heap %u", (unsigned)entries, (unsigned)ESP.getFreeHeap());
-    }
+  scanFiles(currentPath.c_str(),
+            [this, &output, &entries, &seenFirst, &abortReason, &abortFreeHeap, listingStart](const FileInfo& info) {
+              if (!server->client().connected()) {
+                LOG_DBG("WEB", "Client gone after %u entries; abandoning listing", (unsigned)entries);
+                abortReason = "client_gone";
+                return false;
+              }
+              // Stop while a truthful short answer is still deliverable. Without this the
+              // device simply runs out and dies mid-listing -- measured bottoming at 1,248
+              // bytes free -- which gives the caller no answer at all rather than a short
+              // one it can be told about.
+              if ((entries & 0x07) == 0 && ESP.getFreeHeap() < LISTING_MIN_FREE_HEAP) {
+                abortFreeHeap = ESP.getFreeHeap();
+                LOG_ERR("WEB", "Listing abandoned for low heap after %u entries (free=%u)", (unsigned)entries,
+                        (unsigned)abortFreeHeap);
+                abortReason = "low_memory";
+                return false;
+              }
+              if (millis() - listingStart > LISTING_BUDGET_MS) {
+                LOG_ERR("WEB", "Listing stalled after %u entries (%lu ms); client not reading, abandoning",
+                        (unsigned)entries, millis() - listingStart);
+                abortReason = "client_stalled";
+                return false;
+              }
+              if ((entries & 0x0F) == 0) {
+                LOG_DBG("WEB", "listing entry %u, free heap %u", (unsigned)entries, (unsigned)ESP.getFreeHeap());
+              }
 
-    // Escape into the same buffer the record is built in. Only '"', '\\' and the
-    // control range need escaping; UTF-8 above 0x7F is valid inside a JSON string
-    // and passes through byte for byte, which matters for the Arabic filenames
-    // this device is full of.
-    char escaped[300];
-    size_t e = 0;
-    for (const char* c = info.name.c_str(); *c && e + 7 < sizeof(escaped); ++c) {
-      const unsigned char ch = static_cast<unsigned char>(*c);
-      if (ch == '"' || ch == '\\') {
-        escaped[e++] = '\\';
-        escaped[e++] = static_cast<char>(ch);
-      } else if (ch < 0x20) {
-        e += snprintf(escaped + e, sizeof(escaped) - e, "\\u%04x", ch);
-      } else {
-        escaped[e++] = static_cast<char>(ch);
-      }
-    }
-    escaped[e] = '\0';
+              // Escape into the same buffer the record is built in. Only '"', '\\' and the
+              // control range need escaping; UTF-8 above 0x7F is valid inside a JSON string
+              // and passes through byte for byte, which matters for the Arabic filenames
+              // this device is full of.
+              char escaped[300];
+              size_t e = 0;
+              for (const char* c = info.name.c_str(); *c && e + 7 < sizeof(escaped); ++c) {
+                const unsigned char ch = static_cast<unsigned char>(*c);
+                if (ch == '"' || ch == '\\') {
+                  escaped[e++] = '\\';
+                  escaped[e++] = static_cast<char>(ch);
+                } else if (ch < 0x20) {
+                  e += snprintf(escaped + e, sizeof(escaped) - e, "\\u%04x", ch);
+                } else {
+                  escaped[e++] = static_cast<char>(ch);
+                }
+              }
+              escaped[e] = '\0';
 
-    const int written =
-        snprintf(output, sizeof(output), "%s{\"name\":\"%s\",\"size\":%u,\"isDirectory\":%s,\"isEpub\":%s}",
-                 seenFirst ? "," : "", escaped, (unsigned)info.size, info.isDirectory ? "true" : "false",
-                 info.isEpub ? "true" : "false");
-    if (written <= 0 || static_cast<size_t>(written) >= sizeof(output)) {
-      LOG_DBG("WEB", "Skipping entry with oversized JSON");
-      return true;
-    }
-    seenFirst = true;
-    entries++;
-    // The (const char*, size_t) overload: the String one would allocate per entry.
-    server->sendContent(output, static_cast<size_t>(written));
-    return true;
-  });
+              const int written =
+                  snprintf(output, sizeof(output), "%s{\"name\":\"%s\",\"size\":%u,\"isDirectory\":%s,\"isEpub\":%s}",
+                           seenFirst ? "," : "", escaped, (unsigned)info.size, info.isDirectory ? "true" : "false",
+                           info.isEpub ? "true" : "false");
+              if (written <= 0 || static_cast<size_t>(written) >= sizeof(output)) {
+                LOG_DBG("WEB", "Skipping entry with oversized JSON");
+                return true;
+              }
+              seenFirst = true;
+              entries++;
+              // The (const char*, size_t) overload: the String one would allocate per entry.
+              server->sendContent(output, static_cast<size_t>(written));
+              return true;
+            });
 
   server->sendContent("]", 1);
+  if (envelope) {
+    char tail[160];
+    int n;
+    if (abortReason) {
+      n = snprintf(tail, sizeof(tail),
+                   ",\"complete\":false,\"entries_returned\":%u,\"reason\":\"%s\",\"free_heap\":%u}", (unsigned)entries,
+                   abortReason, (unsigned)(abortFreeHeap ? abortFreeHeap : ESP.getFreeHeap()));
+    } else {
+      n = snprintf(tail, sizeof(tail), ",\"complete\":true,\"entries_returned\":%u}", (unsigned)entries);
+    }
+    if (n > 0 && static_cast<size_t>(n) < sizeof(tail)) server->sendContent(tail, static_cast<size_t>(n));
+  }
   server->sendContent("", 0);  // terminating empty chunk
   LOG_DBG("WEB", "Served file listing page for path: %s (%u entries)", currentPath.c_str(), (unsigned)entries);
 }
