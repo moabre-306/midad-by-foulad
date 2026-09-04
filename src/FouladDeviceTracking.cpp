@@ -7,7 +7,6 @@
 #include <Logging.h>
 #include <WiFi.h>
 
-#include <algorithm>
 #include <cstdlib>
 
 #include "CrossPointSettings.h"
@@ -16,7 +15,6 @@
 #include "KOReaderCredentialStore.h"
 #include "KOReaderSyncClient.h"
 #include "MidadAppSettings.h"
-#include "OpdsServerStore.h"
 #include "RecentBooksStore.h"
 #include "network/HttpDownloader.h"
 #include "network/OtaUpdater.h"
@@ -115,32 +113,9 @@ std::string getSerialNumber() {
   return std::string("XTE-") + mac.c_str();
 }
 
-// True when the queued KOSync push cannot possibly authenticate, so attempting it
-// only spends a TLS handshake to earn a 401.
-//
-// /syncs/* lives on the legacy host and authenticates with an x-auth-key that ONLY
-// legacy QR pairing mints. A device paired against Core is never issued one and
-// Core serves no /syncs route, so that pairing 401s forever by construction.
-//
-// Deliberately narrow: the KOSync base URL is user-configurable, and someone
-// pointing it at their own KOSync-compatible server must keep working. Only the
-// midad.one + Core-paired combination is refused, and only for the automatic push
-// on connect -- a manual sync the user asked for still runs and still reports what
-// happened, rather than silently doing nothing.
-bool koSyncCannotAuthenticate() {
-  if (!isFouladEbooksUrl(KOREADER_STORE.getBaseUrl())) return false;  // user's own server
-  const auto& servers = OPDS_STORE.getServers();
-  return std::any_of(servers.begin(), servers.end(), [](const OpdsServer& s) { return s.url == FOULAD_EBOOKS_URL; });
-}
-
 void flushPendingKOReaderSync() {
   if (!wifiConnected()) return;
   if (!KOREADER_STORE.hasPendingSync()) return;
-  if (koSyncCannotAuthenticate()) {
-    // Leave the entry queued rather than dropping it: pointing KOSync at a server
-    // that can authenticate should deliver it, not discard it.
-    return;
-  }
   // Credentials may have been cleared (sign-out, re-pairing) since the item was
   // queued; a stale queue entry would otherwise retry forever with NO_CREDENTIALS.
   if (!KOREADER_STORE.hasCredentials()) {
