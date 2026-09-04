@@ -38,7 +38,11 @@ class BluetoothActivity final : public Activity {
   // BlePeripheralManager::State direct passthrough, minus Off (this screen always
   // requests BLE on entry, so Off only appears for the brief window before begin()
   // completes -- rendered as Starting, same as before the radio has advertised yet).
-  enum class UiState : uint8_t { Starting, Advertising, Connected, PausedLowMemory };
+  // HandedToWifi: the radio was deliberately given to WiFi after a
+  // wifi.autoconnect from the phone, so BLE is off ON PURPOSE. Without it this
+  // reads as Starting -- "Starting Bluetooth..." forever, next to a line saying
+  // Wi-Fi is connected, which is a screen that contradicts itself.
+  enum class UiState : uint8_t { Starting, Advertising, Connected, PausedLowMemory, HandedToWifi };
   // True when onEnter() powered WiFi down to satisfy the BLE gate, so onExit()
   // knows to put it back. Leaving the radio off surprises the user: every other
   // screen that needs the network expects to find it as they left it.

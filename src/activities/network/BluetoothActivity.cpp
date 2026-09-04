@@ -60,7 +60,9 @@ BluetoothActivity::UiState BluetoothActivity::currentUiState() const {
 #ifndef SIMULATOR
   switch (BlePeripheral.state()) {
     case BlePeripheralManager::State::Off:
-      return UiState::Starting;
+      // Off with the request already released means BleWifiAutoConnectCache handed
+      // the radio to WiFi on a successful connect -- not a radio still coming up.
+      return BlePeripheral.isUserRequested() ? UiState::Starting : UiState::HandedToWifi;
     case BlePeripheralManager::State::Advertising:
       return UiState::Advertising;
     case BlePeripheralManager::State::Connected:
@@ -228,6 +230,13 @@ void BluetoothActivity::render(RenderLock&&) {
       break;
     case UiState::PausedLowMemory:
       statusText = tr(STR_BLUETOOTH_PAUSED_LOW_MEMORY);
+      break;
+    case UiState::HandedToWifi:
+      statusText = tr(STR_BLUETOOTH_HANDED_TO_WIFI);
+      // The phone cannot browse files over WiFi alone: the web server only runs
+      // while File Transfer is open here. Say so, rather than leaving the user on
+      // a screen that reports success while the app times out.
+      hintText = tr(STR_BLUETOOTH_FILE_TRANSFER_HINT);
       break;
   }
   renderer.drawCenteredText(UI_12_FONT_ID, nextY, statusText, true, EpdFontFamily::BOLD);
