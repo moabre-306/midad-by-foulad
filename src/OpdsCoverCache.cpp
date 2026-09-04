@@ -82,8 +82,19 @@ bool hasHeapForCoverDecode(const bool isPng) {
   // PNG path is nothrow and null-checked, and the one-shot fallback is itself capped at
   // 24,576 bytes, so an over-large PNG still fails cleanly rather than crashing. The
   // pre-gate here only has to be generous enough not to start work that cannot finish.
-  constexpr uint32_t PNG_MIN_FREE_HEAP = 12 * 1024;
-  constexpr uint32_t PNG_MIN_FREE_BLOCK = 6 * 1024;
+  // 6KB was wrong and cost a download and a TLS handshake per cover before
+  // failing. The one-shot fallback avoids the 32KB *window*, but InflateStream
+  // still needs a tinfl_decompressor -- about 11KB -- and it only comes free
+  // during a framebuffer loan (buildscratch::claim), which is a chapter-build
+  // thing and never held while browsing a catalogue. So a cover decode needs
+  // ~11KB CONTIGUOUS, whatever the total free heap says.
+  //
+  // Measured on an X3 browsing the Arabic store: free 26,624 with a largest
+  // block of 8,180. The old gate passed, the 4KB output buffer allocated fine,
+  // and init then failed on the 11KB state -- reported only as the generic
+  // "Failed to convert cover to BMP", after the bytes were already fetched.
+  constexpr uint32_t PNG_MIN_FREE_HEAP = 16 * 1024;
+  constexpr uint32_t PNG_MIN_FREE_BLOCK = 13 * 1024;
 
   const uint32_t minFree = isPng ? PNG_MIN_FREE_HEAP : JPEG_MIN_FREE_HEAP;
   const uint32_t minBlock = isPng ? PNG_MIN_FREE_BLOCK : JPEG_MIN_FREE_BLOCK;

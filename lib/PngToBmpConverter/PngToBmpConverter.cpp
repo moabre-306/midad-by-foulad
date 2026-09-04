@@ -599,8 +599,11 @@ bool PngToBmpConverter::pngFileToBmpStreamInternal(HalFile& pngFile, Print& bmpO
   HEAP_TRACE_MARK("PNG.ringBuffer", ringBufferOk ? "END-OK" : "END-REFUSED");
   if (!ringBufferOk) {
     // Fall back to one-shot decode: it resolves back-references directly against the
-    // destination buffer instead of a separate window, so it needs no extra 32KB
-    // allocation at all -- just the (much smaller) decompressed image data itself. Only
+    // destination buffer instead of a separate window, so it needs no 32KB WINDOW --
+    // but it still needs InflateStream's ~11KB tinfl_decompressor state, which only
+    // comes free during a framebuffer loan. On a fragmented heap that state is what
+    // fails, not the (much smaller) image buffer, so callers gating on free heap alone
+    // will reach this point and fail here. Only
     // safe when the whole image comfortably fits in one buffer -- true for every OPDS
     // cover (the server caps these at 160x240, 1-bit) and small embedded EPUB covers, but
     // not guaranteed for a large embedded cover, hence the cap rather than always trying.
