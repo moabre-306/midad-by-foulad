@@ -65,6 +65,15 @@ int barsForRssi(int rssi, int currentBars) {
 }
 }  // namespace
 
+namespace {
+// Consumed by the next onEnter(). A plain flag rather than a constructor argument
+// because the activity is created by ActivityManager after a reboot, so there is
+// no caller left to pass anything to.
+bool gSkipModeSelectionOnce = false;
+}  // namespace
+
+void CrossPointWebServerActivity::requestJoinNetworkWithoutPrompt() { gSkipModeSelectionOnce = true; }
+
 void CrossPointWebServerActivity::onEnter() {
   Activity::onEnter();
 
@@ -88,6 +97,14 @@ void CrossPointWebServerActivity::onEnter() {
   connectedSSID.clear();
   lastHandleClientTime = 0;
   requestUpdate();
+
+  // Pre-selected by BLE files.open: go straight to joining the saved network.
+  if (gSkipModeSelectionOnce) {
+    gSkipModeSelectionOnce = false;
+    LOG_INF("WEBACT", "Mode selection skipped (requested over BLE); joining saved network");
+    onNetworkModeSelected(NetworkMode::JOIN_NETWORK);
+    return;
+  }
 
   // Launch network mode selection subactivity
   LOG_DBG("WEBACT", "Launching NetworkModeSelectionActivity...");

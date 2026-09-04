@@ -17,8 +17,10 @@
 #include "BleWifiScanCache.h"
 #include "FouladEbooksConfig.h"
 #include "OpdsServerStore.h"
+#include "SilentRestart.h"
 #include "WifiCredentialStore.h"
 #include "activities/RenderLock.h"
+#include "activities/network/CrossPointWebServerActivity.h"
 
 namespace BleCommandDispatcher {
 
@@ -315,6 +317,29 @@ size_t handleWifiScan(char* outBuf, size_t outBufLen) {
   return 0;
 }
 
+// files.open: put the reader into File Transfer so the phone can browse it.
+//
+// The phone cannot reach the web server over BLE -- it does not exist while this
+// screen is up, since CrossPointWebServerActivity owns it and only one activity
+// runs. So the useful primitive is not "are you serving files" (always no, from
+// here) but "start serving files".
+//
+// The restart is DEFERRED, not immediate: the reply has to reach the phone
+// first, and ESP.restart() would cut the notification off mid-flight. The phone
+// therefore gets an ack and then loses the link, which is the same shape as
+// wifi.autoconnect and something its flow already absorbs.
+bool filesOpenPending = false;
+unsigned long filesOpenAtMs = 0;
+
+size_t handleFilesOpen(char* outBuf, const size_t outBufLen) {
+  constexpr char kCmd[] = "files.open";
+  filesOpenPending = true;
+  // Enough for the GATT notification to be delivered before the reboot.
+  filesOpenAtMs = millis() + 600;
+  LOG_INF("BLECMD", "files.open accepted; entering File Transfer shortly");
+  return formatReply(outBuf, outBufLen, kCmd, "ok", nullptr);
+}
+
 size_t dispatch(const char* cmd, JsonVariantConst payload, char* outBuf, size_t outBufLen) {
   if (strcmp(cmd, "wifi.provision") == 0) {
     return handleWifiProvision(payload, outBuf, outBufLen);
@@ -331,6 +356,9 @@ size_t dispatch(const char* cmd, JsonVariantConst payload, char* outBuf, size_t 
   if (strcmp(cmd, "wifi.autoconnect") == 0) {
     return handleWifiAutoconnect(outBuf, outBufLen);
   }
+  if (strcmp(cmd, "files.open") == 0) {
+    return handleFilesOpen(outBuf, outBufLen);
+  }
   // Explicit reply, not silence -- an older reader talking to a newer phone app
   // should fail as "needs a firmware update," not hang. See docs/ble-module-tasks.md's
   // command-protocol section.
@@ -339,6 +367,15 @@ size_t dispatch(const char* cmd, JsonVariantConst payload, char* outBuf, size_t 
 }  // namespace
 
 void pump() {
+  // Deferred so the files.open reply is actually delivered before the reboot.
+  if (filesOpenPending && static_cast<long>(millis() - filesOpenAtMs) >= 0) {
+    filesOpenPending = false;
+    LOG_INF("BLECMD", "files.open: restarting into File Transfer");
+    CrossPointWebServerActivity::requestJoinNetworkWithoutPrompt();
+    silentRestartToFileTransfer();  // does not return
+    return;
+  }
+
   uint8_t authBuf[BlePeripheralManager::kMaxPayloadLen];
   size_t authLen = 0;
   if (BlePeripheral.takePendingAuth(authBuf, sizeof(authBuf), authLen)) {
