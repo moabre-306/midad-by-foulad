@@ -5,16 +5,26 @@
 namespace FouladTelemetryGate {
 namespace {
 
-// Core serves none of the four routes this module posts to. Flipping this to true is a
-// deliberate act that must follow the routes actually existing -- check Core's
-// route-inventory.ts, which CI holds against the live Hono route table.
-constexpr bool ROUTES_IMPLEMENTED = false;
+// The routes now exist. Core R18 (version c1173627-bcb9-47d3-8f78-8c5f6e5672eb,
+// deployed 2026-09-04 17:56 UTC, migrations 0035+0036) serves
+// POST /devices/v1/heartbeat and POST /devices/v1/logs, both verified live --
+// they answer 401 unauthenticated and appear in the OpenAPI listing.
+//
+// The four routes this comment used to name are gone rather than fixed: the three
+// legacy telemetry posts were removed outright, and only the heartbeat and the
+// crash-report upload remain, both repointed at the routes above.
+constexpr bool ROUTES_IMPLEMENTED = true;
 
-// The upload path runs on HttpDownloader's esp-tls transport, which does not verify the
-// peer. Pairing was moved to wolfSSL with a pinned GTS Root R4 anchor
-// (VerifiedTlsSession); telemetry never was. Flipping this to true requires routing these
-// posts through VerifiedTlsSession first -- not merely editing this constant.
-constexpr bool TLS_VERIFIED = false;
+// Both remaining posts now run on the pinned wolfSSL transport, which is what this
+// flag was waiting for -- not an edit to the constant. sendHeartbeat() and
+// uploadCrashReport() both call HttpDownloader::postJsonWolf() against
+// core_ca::kMidadCoreCaGtsRootR4, the same verified path as device-login.
+//
+// That was not a preference. api.midad.one's chain is ECDSA, and verifying it
+// through esp_crt_bundle makes mbedTLS attempt an RSA modexp it cannot allocate --
+// observed as PK verify error 0x4290 with free heap driven to 128 bytes, which is
+// what broke sign-out until it moved to this transport.
+constexpr bool TLS_VERIFIED = true;
 
 uint8_t consecutiveFailures = 0;
 unsigned long nextAttemptAtMs = 0;
