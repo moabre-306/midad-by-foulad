@@ -30,12 +30,10 @@ bool wifiConnected() { return WiFi.status() == WL_CONNECTED; }
 namespace {
 constexpr char TAG[] = "FDT";
 
-std::string readingStatsEndpoint() { return std::string(FOULAD_EBOOKS_URL) + "/reading-stats"; }
 std::string deviceLogEndpoint() { return std::string(FOULAD_EBOOKS_URL) + "/device-log"; }
-std::string deviceStatsEndpoint() { return std::string(FOULAD_EBOOKS_URL) + "/device-stats"; }
 
-// reportDeviceStats() skips the books/reading-days arrays this connect
-// (device telemetry alone still sends) unless free heap comfortably covers
+// Reserved for the device-stats upload returning on /devices/v1/heartbeat: skip
+// the books/reading-days arrays unless free heap comfortably covers
 // BOTH the actual current data size AND this fixed margin for whatever OPDS
 // browsing/WiFi/TLS is already holding -- scaled to the CURRENT book/day
 // counts rather than the worst case (40 books + 750 days) once and for all,
@@ -64,12 +62,11 @@ std::string displayName() { return std::string("Foulad eInk (") + (gpio.deviceIs
 // the SD card, the same way OPDS browsing/downloading already can.
 void diagLog(const std::string& line) { RollingSdLog::append(DebugLog::PATH, "[FDT] " + line, DebugLog::MAX_LINES); }
 
-// For the crash_report.txt upload/flush lifecycle specifically (see
-// flushPendingCrashReport()) -- forces through RollingSdLog's debugLoggingEnabled gate.
-// Routine FDT chatter (register/firmware-check/device-stats above) stays opt-in via
-// diagLog(), but these three lines are the only local record of an actual panic once
-// crash_report.txt itself is deleted, and per CrossPointSettings::debugLoggingEnabled's
-// own carve-out, crash reporting must survive regardless of the debug-logging preference.
+// For the crash_report.txt lifecycle specifically -- forces through RollingSdLog's
+// debugLoggingEnabled gate. Routine FDT chatter stays opt-in via diagLog(), but these
+// lines are the only local record of an actual panic once crash_report.txt is deleted,
+// and per CrossPointSettings::debugLoggingEnabled's own carve-out, crash reporting must
+// survive regardless of the debug-logging preference.
 // Single point every network-touching entry below returns through when the gate refuses.
 // Logs the reason at most once per reason per boot: the whole point of this change is that
 // a refused upload must not become its own source of SD writes and heap churn.
@@ -110,127 +107,12 @@ uint8_t arabicFontFamilyToDisplayIndex(const uint8_t stored) {
   return 0;  // stale/legacy value (e.g. removed Amiri=1) or out of range
 }
 
-// Single attempt, no 404 handling -- reportReadingStats() (below) is the only
-// caller and owns the retry-after-register decision.
-bool postReadingStatsOnce(const std::string& username, const std::string& password, const std::string& fouladBookId,
-                          const int progressPercent, const std::string& lastPosition, const uint32_t secondsRead) {
-  JsonDocument doc;
-  doc["serial_number"] = getSerialNumber();
-  doc["book_id"] = atoi(fouladBookId.c_str());
-  doc["progress_percent"] = progressPercent;
-  if (!lastPosition.empty()) doc["last_position"] = lastPosition;
-  doc["seconds_read"] = secondsRead;
-  std::string body;
-  serializeJson(doc, body);
-
-  std::string response;
-  const bool ok =
-      HttpDownloader::postJson(readingStatsEndpoint(), body, username, password, response) == HttpDownloader::OK;
-  diagLog("reading-stats book=" + fouladBookId + " progress=" + std::to_string(progressPercent) +
-          " seconds=" + std::to_string(secondsRead) + " -> " +
-          (ok ? "ok" : "FAIL status=" + std::to_string(HttpDownloader::getLastFailure().detail)));
-  return ok;
-}
-
-// Single attempt, no 404 handling -- reportDeviceStats() owns the
-// retry-after-register decision, same convention as postReadingStatsOnce().
-// includeReading false sends `device` telemetry alone (unchanged since last
-// send, or heap too tight for the larger arrays right now).
-bool postDeviceStatsOnce(const std::string& username, const std::string& password, const bool includeReading) {
-  JsonDocument doc;
-  doc["serial_number"] = getSerialNumber();
-
-  JsonObject device = doc["device"].to<JsonObject>();
-  device["battery_percent"] = powerManager.getBatteryPercentage();
-  device["wifi_rssi"] = WiFi.RSSI();
-  device["free_heap_bytes"] = ESP.getFreeHeap();
-  device["uptime_seconds"] = millis() / 1000;
-
-  if (includeReading) {
-    JsonObject reading = doc["reading"].to<JsonObject>();
-    reading["current_streak_days"] = READING_STATS.getCurrentStreakDays();
-    reading["max_streak_days"] = READING_STATS.getMaxStreakDays();
-    reading["today_reading_seconds"] = static_cast<uint32_t>(READING_STATS.getTodayReadingMs() / 1000);
-    reading["total_reading_seconds"] = static_cast<uint32_t>(READING_STATS.getTotalReadingMs() / 1000);
-    reading["books_started"] = READING_STATS.getBooksStartedCount();
-    reading["books_finished"] = READING_STATS.getBooksFinishedCount();
-
-    // book.title empty fallback matches StatsActivity's own bookTitle().
-    JsonArray books = reading["books"].to<JsonArray>();
-    for (const auto& book : READING_STATS.getBooks()) {
-      JsonObject b = books.add<JsonObject>();
-      b["title"] = book.title.empty() ? book.path : book.title;
-      b["author"] = book.author;
-      b["total_reading_seconds"] = static_cast<uint32_t>(book.totalReadingMs / 1000);
-      b["sessions"] = book.sessions;
-      b["progress_percent"] = book.lastProgressPercent;
-      b["completed"] = book.completed;
-      b["last_read_at"] = book.lastReadAt;
-      b["estimated_time_left_seconds"] = book.estimatedTimeLeftSeconds;
-    }
-
-    JsonArray days = reading["reading_days"].to<JsonArray>();
-    for (const auto& day : READING_STATS.getReadingDays()) {
-      JsonObject d = days.add<JsonObject>();
-      d["day_ordinal"] = day.dayOrdinal;
-      d["reading_seconds"] = day.readingMs / 1000;
-    }
-  }
-
-  std::string body;
-  serializeJson(doc, body);
-
-  std::string response;
-  const bool ok =
-      HttpDownloader::postJson(deviceStatsEndpoint(), body, username, password, response) == HttpDownloader::OK;
-  diagLog(std::string("device-stats upload (reading=") + (includeReading ? "yes" : "no") + ") -> " +
-          (ok ? "ok" : "FAIL status=" + std::to_string(HttpDownloader::getLastFailure().detail)));
-  return ok;
-}
 }  // namespace
 
 std::string getSerialNumber() {
   String mac = WiFi.macAddress();
   mac.replace(":", "");
   return std::string("XTE-") + mac.c_str();
-}
-
-void reportReadingStats(const std::string& username, const std::string& password, const std::string& fouladBookId,
-                        const int progressPercent, const std::string& lastPosition, const uint32_t secondsRead) {
-  if (telemetryRefused("reading-stats")) return;
-
-  if (!wifiConnected() || username.empty() || password.empty() || fouladBookId.empty()) return;
-
-  if (postReadingStatsOnce(username, password, fouladBookId, progressPercent, lastPosition, secondsRead)) {
-    return;
-  }
-
-  LOG_ERR(TAG, "Reading-stats report failed (status=%d)", HttpDownloader::getLastFailure().detail);
-  diagLog("reading-stats book=" + fouladBookId +
-          " gave up, status=" + std::to_string(HttpDownloader::getLastFailure().detail));
-}
-
-void flushPendingReadingStats(const std::string& username, const std::string& password) {
-  if (telemetryRefused("reading-stats")) return;
-
-  if (!wifiConnected() || username.empty() || password.empty()) return;
-
-  // Driven by the stats store, not RecentBooksStore. Recents caps at 10 and
-  // evicts, so iterating it silently skipped every catalog book that had been
-  // read but pushed out of the top 10 -- those never produced a library_reading
-  // row on the server no matter how often the device reconnected
-  // (INSTRUCTIONS-14). The stats store holds up to MAX_BOOKS and now carries the
-  // id itself, so the two lists can no longer disagree about what is reportable.
-  READING_STATS.ensureLoaded();
-  int flushed = 0;
-  for (const auto& stats : READING_STATS.getBooks()) {
-    if (stats.fouladBookId.empty()) continue;  // side-loaded, or read before v3
-    if (stats.totalReadingMs == 0) continue;
-    reportReadingStats(username, password, stats.fouladBookId, stats.lastProgressPercent, "",
-                       static_cast<uint32_t>(stats.totalReadingMs / 1000));
-    flushed++;
-  }
-  if (flushed > 0) diagLog("flush: reported " + std::to_string(flushed) + " book(s)");
 }
 
 void flushPendingKOReaderSync() {
@@ -271,39 +153,6 @@ void flushPendingKOReaderSync() {
   // reconnect, same as every other flushPending* function here.
 }
 
-void uploadDebugLog(const std::string& username, const std::string& password) {
-  if (telemetryRefused("debug-log upload")) return;
-
-  if (!DebugLogging::enabled() || !wifiConnected() || username.empty() || password.empty()) return;
-  if (!Storage.exists(DebugLog::PATH)) return;
-
-  const std::vector<std::pair<std::string, std::string>> files = {{"log", DebugLog::PATH}};
-  const std::vector<std::pair<std::string, std::string>> fields = {{"serial_number", getSerialNumber()},
-                                                                   {"firmware_version", CROSSPOINT_VERSION}};
-  std::string response;
-  const bool ok =
-      HttpDownloader::postFilesMultipart(deviceLogEndpoint(), files, fields, response, 20000, username, password);
-
-  // Neither outcome is diagLog()'d, because diagLog() writes to DebugLog::PATH --
-  // the very file this function just uploaded (see diagLog's definition above).
-  //
-  // On failure that would get picked up on the next attempt, and a persistent
-  // failure (e.g. no signal) would spam a line into the log on every reconnect.
-  //
-  // On success it defeats server-side deduplication outright: the upload
-  // endpoint skips storing a body whose hash matches the last one it holds for
-  // this device, so an unchanged reader costs nothing to re-report. Appending
-  // "log upload -> ok" after each successful send made every subsequent body
-  // byte-different, so the hash never matched and every OPDS browse stored a
-  // fresh ~50KB copy (see foulad-ebooks EINK_DEVICE_LOG_TASKS.md 2.4/5.4).
-  //
-  // If a success marker is ever wanted, it has to live somewhere other than the
-  // file being uploaded.
-  if (!ok) {
-    LOG_ERR(TAG, "Debug log upload failed (status=%d)", HttpDownloader::getLastFailure().detail);
-  }
-}
-
 // First line of crash_report.txt is "CrossPoint version: X" (HalSystem::checkPanic).
 // Empty when absent -- an older report, or a truncated write -- and the caller falls
 // back to the running version rather than sending nothing.
@@ -326,11 +175,10 @@ std::string readCrashReportVersion() {
 // for the debug log -- readCrashReportVersion()'s technique (small bounded read, not
 // the full multi-KB report with its backtrace/last-logs sections). This is what lets
 // a "crash happened but I can't find crash_report.txt" report get diagnosed at all:
-// flushPendingCrashReport() deletes the SD copy once it's uploaded, which can be a
-// LATER boot than the one that crashed -- so a user checking the SD card afterward
-// finds nothing, even though the crash was real and the report made it to the server.
-// Logging this summary into debug_log.txt (the file users already pull off the device)
-// before deletion keeps the panic reason visible locally too.
+// the SD copy is deleted once an upload succeeds, which can be a LATER boot than the
+// one that crashed -- so a user checking the SD card afterward finds nothing, even
+// though the crash was real. Logging this summary into debug_log.txt (the file users
+// already pull off the device) keeps the panic reason visible locally.
 std::string readCrashReportSummary() {
   HalFile f;
   if (!Storage.openFileForRead(TAG, CRASH_REPORT_PATH, f)) return "(unreadable)";
@@ -375,54 +223,10 @@ bool uploadCrashReport(const std::string& username, const std::string& password)
   if (!ok) {
     LOG_ERR(TAG, "Crash report upload failed (status=%d)", HttpDownloader::getLastFailure().detail);
   }
-  // Unlike uploadDebugLog(), diagLog() here is safe either way: this writes to
-  // /debug_log.txt, a different file than the one just uploaded.
+  // Safe either way: this writes to /debug_log.txt, not the file just uploaded.
   criticalDiagLog(ok ? "crash report upload -> ok"
                      : "crash report upload -> FAIL status=" + std::to_string(HttpDownloader::getLastFailure().detail));
   return ok;
-}
-
-void flushPendingCrashReport(const std::string& username, const std::string& password) {
-  if (telemetryRefused("crash-report upload")) return;
-
-  if (!Storage.exists(CRASH_REPORT_PATH)) return;  // nothing waiting
-  if (!uploadCrashReport(username, password)) return;
-  // See readCrashReportSummary(): capture the panic reason locally before the SD
-  // copy is deleted below, since the upload+delete can happen on a boot after the
-  // one the user actually has eyes on.
-  criticalDiagLog("crash summary: " + readCrashReportSummary());
-  // Delivered: drop the local copy so the next connection does not resend it.
-  // Deliberately only on success -- a failed upload leaves the file for the next
-  // attempt, which is the whole point of queueing it rather than requiring the
-  // user to be looking at the crash screen at the moment they have WiFi.
-  Storage.remove(CRASH_REPORT_PATH);
-  criticalDiagLog("crash report flushed and cleared");
-}
-
-void reportDeviceStats(const std::string& username, const std::string& password) {
-  if (telemetryRefused("device-stats")) return;
-
-  if (!wifiConnected() || username.empty() || password.empty()) return;
-
-  READING_STATS.ensureLoaded();
-  const uint64_t totalMs = READING_STATS.getTotalReadingMs();
-  const bool readingChanged = totalMs != lastReportedTotalReadingMs;
-  const uint32_t estimatedReadingBytes =
-      static_cast<uint32_t>(READING_STATS.getBooks().size()) * ESTIMATED_BYTES_PER_BOOK +
-      static_cast<uint32_t>(READING_STATS.getReadingDays().size()) * ESTIMATED_BYTES_PER_READING_DAY;
-  const bool includeReading =
-      readingChanged && ESP.getFreeHeap() >= estimatedReadingBytes + READING_SNAPSHOT_SAFETY_MARGIN_BYTES;
-  if (readingChanged && !includeReading) {
-    diagLog("device-stats reading snapshot skipped: free heap=" + std::to_string(ESP.getFreeHeap()) +
-            " need=" + std::to_string(estimatedReadingBytes + READING_SNAPSHOT_SAFETY_MARGIN_BYTES));
-  }
-
-  const bool ok = postDeviceStatsOnce(username, password, includeReading);
-
-  // Only remember success -- a failed send (including one that skipped the
-  // reading snapshot for heap reasons) should retry next connect, not be
-  // treated as "already reported."
-  if (ok && includeReading) lastReportedTotalReadingMs = totalMs;
 }
 
 }  // namespace FouladDeviceTracking

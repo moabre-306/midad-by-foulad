@@ -40,8 +40,8 @@ struct ReadingBookStats {
   std::string author;
   // Foulad eBooks catalog id, empty for a side-loaded file. Lives here rather
   // than only in RecentBooksStore because that list is capped at 10 and evicts:
-  // a catalog book read a while ago used to lose its id entirely, so
-  // flushPendingReadingStats() could never report it and the server never got a
+  // a catalog book read a while ago used to lose its id entirely, so the
+  // reading-stats flush could never report it and the server never got a
   // library_reading row for it (see INSTRUCTIONS-14). Here it has exactly the
   // lifetime of the reading it describes.
   //

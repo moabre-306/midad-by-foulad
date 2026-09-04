@@ -182,13 +182,6 @@ void CrossPointWebServerActivity::reportDeviceTrackingOnConnect() {
   // independently configured, so this is worth attempting whenever WiFi comes
   // up here, same reasoning as OpdsBookBrowserActivity's version of this call.
   FouladDeviceTracking::flushPendingKOReaderSync();
-
-  const auto& servers = OPDS_STORE.getServers();
-  const auto it =
-      std::find_if(servers.begin(), servers.end(), [](const OpdsServer& s) { return s.url == FOULAD_EBOOKS_URL; });
-  if (it == servers.end()) return;  // no Foulad eBooks account configured -- nothing to report to
-
-  FouladDeviceTracking::reportDeviceStats(it->username, it->password);
 }
 
 void CrossPointWebServerActivity::onWifiSelectionComplete(const bool connected) {

@@ -20,38 +20,11 @@ void reportDeviceTrackingOnConnect(const OpdsServer& server) {
   // for ANY OPDS server, Foulad eBooks or not.
   FouladDeviceTracking::flushPendingKOReaderSync();
 
-  if (server.url != FOULAD_EBOOKS_URL) return;
-  FouladTelemetryGate::resetForNewConnection();
-
-  // ONE upload per connect, round-robin, never a burst.
-  //
-  // These five used to run back-to-back the moment WiFi came up. Each opens its own TLS
-  // session needing a ~16.7KB contiguous buffer, so on a device with ~40KB free and a
-  // largest block well under that, they starved each other and left the heap at 3264
-  // bytes free -- the "slow and stuck" report of 2026-09-01. Whatever is queued still
-  // gets sent, just one connection at a time: crash reports and the debug log are
-  // preserved on SD until their upload actually succeeds, so nothing is lost by waiting.
-  //
-  // Ordered by how irreplaceable the data is. A crash report exists once and explains a
-  // failure nobody else can reproduce; a stats snapshot is regenerated every session.
-  static uint8_t nextTask = 0;
-  constexpr uint8_t TASK_COUNT = 4;
-  const uint8_t task = nextTask;
-  nextTask = static_cast<uint8_t>((nextTask + 1) % TASK_COUNT);
-  switch (task) {
-    case 0:
-      FouladDeviceTracking::flushPendingCrashReport(server.username, server.password);
-      break;
-    case 1:
-      FouladDeviceTracking::flushPendingReadingStats(server.username, server.password);
-      break;
-    case 2:
-      FouladDeviceTracking::uploadDebugLog(server.username, server.password);
-      break;
-    default:
-      FouladDeviceTracking::reportDeviceStats(server.username, server.password);
-      break;
-  }
+  // Core serves no device-telemetry routes: /opds/reading-stats, /opds/device-log
+  // and /opds/device-stats were legacy-only and were not carried over, so the
+  // uploads that used to round-robin here all answered 404. Crash reports and the
+  // debug log stay on SD untouched, waiting for /devices/v1/logs.
+  (void)server;
 }
 
 void removeExistingNewsDownload(const std::string& filename) {
