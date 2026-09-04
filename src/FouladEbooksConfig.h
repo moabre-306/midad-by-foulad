@@ -40,12 +40,11 @@ inline bool isNewsBookPath(const std::string_view path) { return path.rfind("/Ne
 
 // Font-conversion relay endpoint (Settings/File Transfer portal -> Fonts ->
 // Convert a Font): the device uploads a raw TTF/OTF plus a language choice,
-// foulad-ebooks converts it into the device's .cpfont SD-font format (4 sizes)
-// and responds with download URLs. Open endpoint, no auth -- foulad-ebooks is
-// expected to rate-limit this server-side. Plain http:// for the same reason
-// as FOULAD_EBOOKS_URL above (foulad.one's current certificate chain isn't in
-// ESP-IDF's trust bundle); revisit alongside that fix.
-constexpr char FOULAD_EBOOKS_FONT_CONVERT_URL[] = "http://midad.one/api/fonts/convert";
+// the legacy host converts it into the device's .cpfont SD-format (4 sizes)
+// and responds with download URLs. Open endpoint, no auth -- rate-limited
+// server-side. Stays on the legacy host deliberately: the converter is a Python
+// service, so Core has no equivalent and will not gain one.
+constexpr char FOULAD_EBOOKS_FONT_CONVERT_URL[] = "https://midad.one/api/fonts/convert";
 
 // QR-code sign-in (see FouladDeviceLogin.h). Unauthenticated JSON POSTs, no
 // cookies/CSRF. Nothing secret is sent TO these endpoints; the token they return
@@ -67,14 +66,6 @@ constexpr char FOULAD_EBOOKS_DEVICE_LOGIN_POLL_URL[] = "https://api.midad.one/de
 // Answers 204 on success and 401 when the token is already dead.
 constexpr char FOULAD_EBOOKS_DEVICE_SIGNOUT_URL[] = "https://api.midad.one/device-login/self-revoke";
 
-// Foulad One's app JSON API, used by signing out to remove this device from the
-// account (see FouladDeviceLogout). Behind the SAME opds.auth Basic-Auth middleware
-// as the OPDS routes above, so the credential already stored for Foulad eBooks
-// authenticates here unchanged -- no separate login, and no new server endpoint was
-// needed for the device to remove itself.
-//
-// GET  <base>       -> this account's devices, each carrying id and serial_number
-// DELETE <base>/{id} -> remove one
 // Cross-device reading position (EINK_PAGE_SYNC_TASKS.md). POST reports where this
 // device is and returns where the ACCOUNT is in one round trip; GET only looks, for
 // when there is nothing honest to report yet. Same opds.auth Basic Auth as the feed.
@@ -82,9 +73,11 @@ constexpr char FOULAD_EBOOKS_DEVICE_SIGNOUT_URL[] = "https://api.midad.one/devic
 // The shared currency is progress_percent, not page: the phone paginates with
 // epub.js at its own font size and cannot act on a page number computed for a
 // 5-inch panel. page/total_pages are sent for display only.
-constexpr char FOULAD_EBOOKS_READING_POSITION_URL[] = "http://midad.one/opds/reading-position";
-
-constexpr char FOULAD_EBOOKS_APP_DEVICES_URL[] = "http://midad.one/api/app/devices";
+//
+// Carries the device credential in an Authorization header, so it must never be
+// plain http://. Core is replacing this with /resume/v1/items/{id}/position on
+// api.midad.one; this stays pointed at the legacy host until that lands.
+constexpr char FOULAD_EBOOKS_READING_POSITION_URL[] = "https://midad.one/opds/reading-position";
 
 // Midad's own hosts. Matched on the host rather than on a
 // URL prefix because the requests that must carry the device serial header are
