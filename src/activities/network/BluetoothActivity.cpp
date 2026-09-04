@@ -7,6 +7,9 @@
 // state, per BLE-R2's simulator-compilability goal (unlike the stale branch's design,
 // which excluded this file from the simulator build entirely).
 #include <BlePeripheralManager.h>
+
+#include "BleWifiAutoConnectCache.h"
+#include "BleWifiScanCache.h"
 #endif
 #include <FontCacheManager.h>
 #include <GfxRenderer.h>
@@ -18,6 +21,40 @@
 #include "components/icons/bluetooth64.h"
 #include "fontIds.h"
 #include "reading/ReadingStatsStore.h"
+
+#ifndef SIMULATOR
+// Combined WiFi line for the two BLE-driven radio state machines. Nullptr when
+// neither is doing anything, so the screen stays clean in the normal case.
+const char* BluetoothActivity::wifiStatusText() {
+  switch (BleWifiScanCache::currentState()) {
+    case BleWifiScanCache::State::PendingStart:
+    case BleWifiScanCache::State::Scanning:
+      return tr(STR_BLUETOOTH_WIFI_SCANNING);
+    case BleWifiScanCache::State::Failed:
+      return tr(STR_BLUETOOTH_WIFI_FAILED);
+    default:
+      break;
+  }
+  switch (BleWifiAutoConnectCache::currentState()) {
+    case BleWifiAutoConnectCache::State::PendingStart:
+    case BleWifiAutoConnectCache::State::Connecting:
+      return tr(STR_BLUETOOTH_WIFI_CONNECTING);
+    case BleWifiAutoConnectCache::State::Done:
+      return tr(STR_BLUETOOTH_WIFI_CONNECTED);
+    case BleWifiAutoConnectCache::State::Failed:
+      return tr(STR_BLUETOOTH_WIFI_FAILED);
+    default:
+      break;
+  }
+  return nullptr;
+}
+
+// One value covering both machines, so loop() can notice a change and repaint.
+int BluetoothActivity::wifiStateKey() {
+  return static_cast<int>(BleWifiScanCache::currentState()) * 16 +
+         static_cast<int>(BleWifiAutoConnectCache::currentState());
+}
+#endif
 
 BluetoothActivity::UiState BluetoothActivity::currentUiState() const {
 #ifndef SIMULATOR
@@ -127,6 +164,16 @@ void BluetoothActivity::loop() {
     return;
   }
 
+#ifndef SIMULATOR
+  // The radio machines advance on the main loop independently of BLE's own state,
+  // so nothing else would repaint this screen while a scan or connect runs.
+  const int wifiKey = wifiStateKey();
+  if (wifiKey != lastRenderedWifiState_) {
+    lastRenderedWifiState_ = wifiKey;
+    requestUpdate();
+  }
+#endif
+
   const int nowState = static_cast<int>(currentUiState());
   if (nowState != lastRenderedUiState_) {
     requestUpdate();
@@ -136,6 +183,9 @@ void BluetoothActivity::loop() {
 void BluetoothActivity::render(RenderLock&&) {
   const UiState state = currentUiState();
   lastRenderedUiState_ = static_cast<int>(state);
+#ifndef SIMULATOR
+  lastRenderedWifiState_ = wifiStateKey();
+#endif
 
   const int pageWidth = renderer.getScreenWidth();
   const int pageHeight = renderer.getScreenHeight();
@@ -182,6 +232,23 @@ void BluetoothActivity::render(RenderLock&&) {
   }
   renderer.drawCenteredText(UI_12_FONT_ID, nextY, statusText, true, EpdFontFamily::BOLD);
   nextY += renderer.getLineHeight(UI_12_FONT_ID) + 8;
+
+#ifndef SIMULATOR
+  // What the PHONE just asked this device to do. Without it the reader shows only
+  // its own BLE state, so a wifi.scan or wifi.autoconnect issued from the app is
+  // invisible here -- the screen sits on "Ready" while the radio is actually busy,
+  // and a failed connect looks identical to nothing having happened.
+  //
+  // It also explains the handover: a successful connect releases BLE (see
+  // BleWifiAutoConnectCache::finishConnect), so this line is what tells the user
+  // the Bluetooth link ended because WiFi took the radio, rather than because
+  // something broke.
+  const char* wifiText = wifiStatusText();
+  if (wifiText) {
+    renderer.drawCenteredText(SMALL_FONT_ID, nextY, wifiText, true);
+    nextY += renderer.getLineHeight(SMALL_FONT_ID) + 8;
+  }
+#endif
 
   if (hintText) {
     renderer.drawCenteredText(SMALL_FONT_ID, nextY, hintText, true);

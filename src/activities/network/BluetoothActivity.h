@@ -51,4 +51,11 @@ class BluetoothActivity final : public Activity {
   // checking here too means this screen repaints correctly even if that nudge is ever
   // missed, and costs nothing when it isn't).
   int lastRenderedUiState_ = -1;
+#ifndef SIMULATOR
+  // Text for whichever BLE-driven radio operation is in flight, or nullptr.
+  static const char* wifiStatusText();
+  // Both machines folded into one comparable value, so a change repaints.
+  static int wifiStateKey();
+  int lastRenderedWifiState_ = -1;
+#endif
 };
