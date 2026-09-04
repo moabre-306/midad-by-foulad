@@ -548,7 +548,7 @@ void CrossPointWebServer::handleStatus() const {
   server->send(200, "application/json", response);
 }
 
-void CrossPointWebServer::scanFiles(const char* path, const std::function<void(const FileInfo&)>& callback) const {
+void CrossPointWebServer::scanFiles(const char* path, const std::function<bool(const FileInfo&)>& callback) const {
   HalFile root = Storage.open(path);
   if (!root) {
     LOG_DBG("WEB", "Failed to open directory: %s", path);
@@ -597,7 +597,11 @@ void CrossPointWebServer::scanFiles(const char* path, const std::function<void(c
         info.isEpub = isEpubFile(info.name);
       }
 
-      callback(info);
+      if (!callback(info)) {
+        file.close();
+        root.close();
+        return;
+      }
     }
 
     file.close();
@@ -637,7 +641,24 @@ void CrossPointWebServer::handleFileListData() const {
   bool seenFirst = false;
   JsonDocument doc;
 
-  scanFiles(currentPath.c_str(), [this, &output, &doc, seenFirst](const FileInfo& info) mutable {
+  size_t entries = 0;
+  scanFiles(currentPath.c_str(), [this, &output, &doc, &entries, seenFirst](const FileInfo& info) mutable {
+    // Stop the moment the client is gone. sendContent() writes to a socket with
+    // no caller-visible timeout, so streaming into a peer that has stopped reading
+    // -- or half-closed, which Safari does with speculative connections -- blocks
+    // inside this loop with the main loop stuck behind it. The device then looks
+    // frozen and only a power cycle clears it. Observed on the reference X3: the
+    // scan started and "Served file listing page" never printed.
+    if (!server->client().connected()) {
+      LOG_DBG("WEB", "Client gone after %u entries; abandoning listing", (unsigned)entries);
+      return false;
+    }
+    // Throttled progress, so a stall inside the scan is locatable next time rather
+    // than presenting as silence.
+    if ((entries & 0x0F) == 0) {
+      LOG_DBG("WEB", "listing entry %u, free heap %u", (unsigned)entries, (unsigned)ESP.getFreeHeap());
+    }
+    entries++;
     doc.clear();
     doc["name"] = info.name;
     doc["size"] = info.size;
@@ -648,7 +669,7 @@ void CrossPointWebServer::handleFileListData() const {
     if (written >= outputSize) {
       // JSON output truncated; skip this entry to avoid sending malformed JSON
       LOG_DBG("WEB", "Skipping file entry with oversized JSON for name: %s", info.name.c_str());
-      return;
+      return true;
     }
 
     if (seenFirst) {
@@ -657,11 +678,12 @@ void CrossPointWebServer::handleFileListData() const {
       seenFirst = true;
     }
     server->sendContent(output);
+    return true;
   });
   server->sendContent("]");
   // End of streamed response, empty chunk to signal client
   server->sendContent("");
-  LOG_DBG("WEB", "Served file listing page for path: %s", currentPath.c_str());
+  LOG_DBG("WEB", "Served file listing page for path: %s (%u entries)", currentPath.c_str(), (unsigned)entries);
 }
 
 void CrossPointWebServer::handleDownload() const {
