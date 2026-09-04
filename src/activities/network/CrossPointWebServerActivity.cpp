@@ -362,11 +362,29 @@ void CrossPointWebServerActivity::loop() {
       // Reset watchdog BEFORE processing - HTTP header parsing can be slow
       resetTaskWatchdogIfSubscribed();
 
-      // Process HTTP requests in tight loop for maximum throughput
-      // More iterations = more data processed per main loop cycle
+      // Process HTTP requests in a tight loop for throughput, but bounded by
+      // WALL-CLOCK time and not just an iteration count.
+      //
+      // handleClient() blocks for up to HTTP_MAX_DATA_WAIT (5000 ms,
+      // WebServer.h:66) whenever a client opens a connection and never completes
+      // its request -- which Safari and macOS do routinely, opening speculative
+      // connections they may never use. At 500 iterations that is potentially tens
+      // of minutes inside this loop: no main loop, no repaint, no [MEM] heartbeat
+      // and no way out, since the Back/Home check below only runs between calls.
+      // The device is not crashed, but it is indistinguishable from frozen and only
+      // a manual reload clears it. Observed twice on the reference X3 opening File
+      // Transfer from an Apple client, the second time with no file listing served
+      // at all -- it stalled on the connection, not on any request.
+      //
+      // The budget caps a stalled client at one blocking wait per main-loop cycle
+      // instead of five hundred. It cannot make a single wait shorter; that is the
+      // library's timeout, not ours.
       constexpr int MAX_ITERATIONS = 500;
+      constexpr unsigned long HANDLE_CLIENT_BUDGET_MS = 200;
+      const unsigned long handleClientStart = millis();
       for (int i = 0; i < MAX_ITERATIONS && webServer->isRunning(); i++) {
         webServer->handleClient();
+        if (millis() - handleClientStart >= HANDLE_CLIENT_BUDGET_MS) break;
         // Reset watchdog every 32 iterations
         if ((i & 0x1F) == 0x1F) {
           resetTaskWatchdogIfSubscribed();
