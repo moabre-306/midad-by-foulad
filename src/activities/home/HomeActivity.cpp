@@ -256,55 +256,109 @@ bool HomeActivity::storeCoverBuffer() {
   const size_t needed = renderer.getRegionByteSize(coverRectX, coverRectY, coverRectW, coverRectH);
   if (needed == 0) return false;
 
-  // Reuse before reallocating: the rect only changes with orientation, so on every
-  // ordinary redraw the buffer already on hand is exactly the right size, and
-  // free/malloc of a ~40KB block for it is pure fragmentation.
-  if (coverBuffer && coverBufferSize == needed) {
-    return renderer.copyRegionToBuffer(coverRectX, coverRectY, coverRectW, coverRectH, coverBuffer, coverBufferSize);
-  }
-
-  // Budget check BEFORE freeing anything: a refusal must not also throw away a
-  // usable buffer. See HomeCoverBudget.h for why the rule is a reserve rather
-  // than a size cap.
   const uint32_t freeHeap = ESP.getFreeHeap();
   const uint32_t maxAlloc = ESP.getMaxAllocHeap();
-  if (!HomeCoverBudget::fits(needed, freeHeap, maxAlloc)) {
+
+  // Total cost is the same whatever the split, so refuse on that first.
+  if (!HomeCoverBudget::fitsTotal(needed, freeHeap)) {
     coverBufferDenied = true;
     LOG_ERR("HOME", "Cover snapshot declined: %u bytes, free %u, maxAlloc %u", (unsigned)needed, (unsigned)freeHeap,
             (unsigned)maxAlloc);
-    HEAP_TRACE_EVENT("HOME.snapshot", "DECLINED needed=%u latched (covers fall back to the cached thumb BMPs)",
-                     (unsigned)needed);
     return false;
   }
 
-  freeCoverBuffer();
-  coverBuffer = static_cast<uint8_t*>(malloc(needed));
-  if (!coverBuffer) {
+  // Fewest bands whose individual allocations fit the largest free block. One
+  // block is preferred and usually impossible on an X3: the whole tile is ~42KB
+  // against a largest block of about the same, which leaves the allocator nothing
+  // and is refused by design. Two bands of ~21KB fit the same heap comfortably.
+  int bands = 0;
+  for (const int candidate : {1, 2, 4}) {
+    const int bandH = (coverRectH + candidate - 1) / candidate;
+    size_t worst = 0;
+    for (int i = 0; i < candidate; i++) {
+      const int y = coverRectY + i * bandH;
+      const int h = std::min(bandH, coverRectY + coverRectH - y);
+      if (h <= 0) continue;
+      worst = std::max(worst, renderer.getRegionByteSize(coverRectX, y, coverRectW, h));
+    }
+    if (HomeCoverBudget::fitsBlock(worst, maxAlloc)) {
+      bands = candidate;
+      break;
+    }
+  }
+  if (bands == 0) {
     coverBufferDenied = true;
-    LOG_ERR("HOME", "OOM: cover buffer (%u bytes)", (unsigned)needed);
+    LOG_ERR("HOME", "Cover snapshot declined: %u bytes in <=%d bands, free %u, maxAlloc %u", (unsigned)needed,
+            MAX_COVER_BANDS, (unsigned)freeHeap, (unsigned)maxAlloc);
     return false;
   }
-  coverBufferSize = needed;
-  if (!renderer.copyRegionToBuffer(coverRectX, coverRectY, coverRectW, coverRectH, coverBuffer, coverBufferSize)) {
-    free(coverBuffer);
-    coverBuffer = nullptr;
-    coverBufferSize = 0;
-    return false;
+
+  // Reuse before reallocating: the geometry only changes with orientation, so on
+  // an ordinary redraw the bands already on hand are the right shape, and
+  // free/malloc of tens of KB per repaint is pure fragmentation.
+  const int bandH = (coverRectH + bands - 1) / bands;
+  bool reusable = coverBandCount == bands;
+  for (int i = 0; reusable && i < bands; i++) {
+    const int y = coverRectY + i * bandH;
+    const int h = std::min(bandH, coverRectY + coverRectH - y);
+    reusable = coverBands[i] != nullptr && coverBandY[i] == y && coverBandH[i] == h;
+  }
+  if (!reusable) {
+    freeCoverBuffer();
+    for (int i = 0; i < bands; i++) {
+      const int y = coverRectY + i * bandH;
+      const int h = std::min(bandH, coverRectY + coverRectH - y);
+      if (h <= 0) break;
+      const size_t size = renderer.getRegionByteSize(coverRectX, y, coverRectW, h);
+      auto* buf = static_cast<uint8_t*>(malloc(size));
+      if (!buf) {
+        LOG_ERR("HOME", "OOM: cover band %d (%u bytes)", i, (unsigned)size);
+        freeCoverBuffer();
+        coverBufferDenied = true;
+        return false;
+      }
+      coverBands[i] = buf;
+      coverBandSizes[i] = size;
+      coverBandY[i] = y;
+      coverBandH[i] = h;
+      coverBandCount = i + 1;
+    }
+    LOG_DBG("HOME", "Cover snapshot: %u bytes in %d band(s), maxAlloc %u", (unsigned)needed, coverBandCount,
+            (unsigned)maxAlloc);
+  }
+
+  for (int i = 0; i < coverBandCount; i++) {
+    if (!renderer.copyRegionToBuffer(coverRectX, coverBandY[i], coverRectW, coverBandH[i], coverBands[i],
+                                     coverBandSizes[i])) {
+      freeCoverBuffer();
+      return false;
+    }
   }
   return true;
 }
 
 bool HomeActivity::restoreCoverBuffer() {
-  if (!coverBuffer || coverRectW <= 0 || coverRectH <= 0) return false;
-  return renderer.copyBufferToRegion(coverRectX, coverRectY, coverRectW, coverRectH, coverBuffer, coverBufferSize);
+  if (coverBandCount == 0 || coverRectW <= 0 || coverRectH <= 0) return false;
+  for (int i = 0; i < coverBandCount; i++) {
+    if (!renderer.copyBufferToRegion(coverRectX, coverBandY[i], coverRectW, coverBandH[i], coverBands[i],
+                                     coverBandSizes[i])) {
+      return false;
+    }
+  }
+  return true;
 }
 
 void HomeActivity::freeCoverBuffer() {
-  if (coverBuffer) {
-    free(coverBuffer);
-    coverBuffer = nullptr;
+  for (int i = 0; i < MAX_COVER_BANDS; i++) {
+    if (coverBands[i]) {
+      free(coverBands[i]);
+      coverBands[i] = nullptr;
+    }
+    coverBandSizes[i] = 0;
+    coverBandY[i] = 0;
+    coverBandH[i] = 0;
   }
-  coverBufferSize = 0;
+  coverBandCount = 0;
   coverBufferStored = false;
 }
 
@@ -343,7 +397,7 @@ void HomeActivity::loop() {
   //
   // replaceActivity(), not startActivityForResult(): measured on real hardware
   // (BLE-R2 correction 3) that push-based entry left Home fully resident on
-  // ActivityManager's stack -- onExit() never fires, so HomeActivity::coverBuffer
+  // ActivityManager's stack -- onExit() never fires, so HomeActivity's cover bands
   // (~42KB) stays allocated for BluetoothActivity's entire lifetime, and the
   // radio's 70KB heap gate reliably failed to clear (measured: capped at ~62.6KB
   // free vs. the gate's 71.7KB). replaceActivity() destroys this HomeActivity

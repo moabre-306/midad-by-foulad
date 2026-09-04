@@ -1517,17 +1517,27 @@ void EpubReaderActivity::accountPageDwellForStats(const bool isForwardTurn) {
   // That is the difference between an age we can send and one we cannot -- see the
   // close-sync block in onExit().
   pageTurnedThisSession = true;
-  if (elapsed == 0 || elapsed > READING_IDLE_THRESHOLD_SECONDS) {
-    // Zero-second flicks aren't reading; anything past the idle threshold means the
-    // reader was set aside with the page open -- discard rather than inflate stats.
-    return;
-  }
-  READING_STATS.addReadingTime(elapsed);
+  if (elapsed == 0) return;  // zero-second flicks aren't reading
+  // Past the idle threshold the reader was set aside with the page open, so the
+  // interval is capped rather than dropped: credit = min(elapsed, 300). Capping
+  // keeps the rule monotonic -- discarding meant 299 s counted in full and 301 s
+  // counted as nothing -- and no page loses time it was credited before, since
+  // everything under the threshold is unchanged.
+  //
+  // The accepted cost (Midad reading-statistics contract 2.6): leaving the book
+  // open inside the sleep window and then turning one page earns up to 5 minutes.
+  // If that matters, the fix is a per-day cap on capped intervals once real dwell
+  // data exists -- recordForwardPage() keeps only an EMA today, so there is none.
+  const uint32_t counted = std::min(elapsed, READING_IDLE_THRESHOLD_SECONDS);
+  READING_STATS.addReadingTime(counted);
   if (isForwardTurn) {
     if (paceWarmupPending) {
       // First dwell after open/jump includes setup, not just reading.
       paceWarmupPending = false;
-    } else if (elapsed >= MIN_PACE_SAMPLE_SECONDS) {
+    } else if (elapsed >= MIN_PACE_SAMPLE_SECONDS && elapsed <= READING_IDLE_THRESHOLD_SECONDS) {
+      // Pace deliberately uses the UNCAPPED dwell and ignores anything past the
+      // threshold: a capped idle interval is not a reading-speed sample, and
+      // feeding 300 s into the EMA would wreck the time-left estimate.
       READING_STATS.recordForwardPage(elapsed);
     }
   }

@@ -73,7 +73,6 @@ class ReadingStatsStore {
   static constexpr size_t MAX_DAYS_PER_BOOK = 90;
   static constexpr size_t MAX_AGGREGATE_DAYS = 750;
   static constexpr unsigned long DEFERRED_SAVE_INTERVAL_MS = 5UL * 60UL * 1000UL;
-  static constexpr uint32_t MIN_SESSION_SECONDS = 60;
 
   struct SessionState {
     bool active = false;
