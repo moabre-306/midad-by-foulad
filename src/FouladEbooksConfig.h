@@ -79,6 +79,14 @@ constexpr char FOULAD_EBOOKS_DEVICE_SIGNOUT_URL[] = "https://api.midad.one/devic
 // api.midad.one; this stays pointed at the legacy host until that lands.
 constexpr char FOULAD_EBOOKS_READING_POSITION_URL[] = "https://midad.one/opds/reading-position";
 
+// Crash-report upload. Legacy, like reading-position above and for the same
+// reason: the route lives on midad.one and was never carried over to Core, so
+// building it from FOULAD_EBOOKS_URL (now api.midad.one) addressed a host that
+// has no such endpoint and 404'd every time. Core replaces it with
+// /devices/v1/logs; repointed here rather than removed so crash diagnostics keep
+// working in the meantime.
+constexpr char FOULAD_EBOOKS_DEVICE_LOG_URL[] = "https://midad.one/opds/device-log";
+
 // Midad's own hosts. Matched on the host rather than on a
 // URL prefix because the requests that must carry the device serial header are
 // spread across several path roots -- /opds/*, /books/{id}/download, /xtc, cover

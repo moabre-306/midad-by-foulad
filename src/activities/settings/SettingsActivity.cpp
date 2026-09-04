@@ -436,44 +436,22 @@ void SettingsActivity::toggleCurrentSetting() {
         silentRestartToFileTransfer();
         break;
       case SettingAction::FouladEbooksLogout: {
-        // Two stages: confirm, then have the server actually drop this device. The
-        // credential is only cleared once the server says so -- previously this was
-        // local-only, so signing out left the unit listed under "My Devices" with a
-        // token that still authenticated.
-        auto removedHandler = [this](const ActivityResult& logoutResult) {
-          if (!logoutResult.isCancelled) {
-            auto& servers = OPDS_STORE.getServers();
-            for (size_t i = 0; i < servers.size(); i++) {
-              if (servers[i].url == FOULAD_EBOOKS_URL) {
-                OPDS_STORE.removeServer(i);
-                break;
-              }
-            }
-          }
-          rebuildSettingsLists();
-          selectedSettingIndex = std::min(selectedSettingIndex, settingsCount);
-        };
-
-        auto logoutHandler = [this, removedHandler](const ActivityResult& result) {
+        // Confirm, then reboot into the sign-out. The credential is only cleared
+        // once the server confirms removal, so the device never believes it is
+        // signed out while the account still lists it.
+        //
+        // The reboot is not cosmetic. The
+        // self-revoke POST is a TLS handshake, and from Settings with WiFi already
+        // up it found a 9,716-byte largest block against the ~17KB a handshake
+        // needs -- it could not open the connection at all. Same treatment OTA,
+        // File Transfer and QR sign-in already get.
+        auto logoutHandler = [this](const ActivityResult& result) {
           if (result.isCancelled) {
             rebuildSettingsLists();
             selectedSettingIndex = std::min(selectedSettingIndex, settingsCount);
             return;
           }
-          // Credentials are read here rather than inside the activity so it stays a
-          // pure "remove this device" step with no knowledge of OpdsServerStore.
-          std::string username;
-          std::string password;
-          for (const auto& server : OPDS_STORE.getServers()) {
-            if (server.url == FOULAD_EBOOKS_URL) {
-              username = server.username;
-              password = server.password;
-              break;
-            }
-          }
-          startActivityForResult(
-              std::make_unique<FouladLogoutActivity>(renderer, mappedInput, std::move(username), std::move(password)),
-              removedHandler);
+          silentRestartToLogout();  // does not return
         };
         startActivityForResult(
             std::make_unique<ConfirmationActivity>(renderer, mappedInput, tr(STR_FOULAD_EBOOKS_LOGOUT_CONFIRM), ""),

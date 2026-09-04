@@ -23,6 +23,7 @@
 #include "apps/GymActivity.h"
 #include "boot_sleep/BootActivity.h"
 #include "boot_sleep/SleepActivity.h"
+#include "browser/FouladLogoutActivity.h"
 #include "browser/FouladQrLoginActivity.h"
 #include "browser/OpdsBookBrowserActivity.h"
 #include "home/CrashActivity.h"
@@ -316,6 +317,44 @@ void ActivityManager::goToFouladEbooks() {
   }
   // First time on this device — collect username/password before browsing.
   replaceActivity(std::make_unique<FouladQrLoginActivity>(renderer, mappedInput));
+}
+
+namespace {
+// Runs when the top-level sign-out finishes. Clearing the stored credential is
+// deliberately gated on the server having confirmed removal: the device must
+// never believe it is signed out while the account still lists it.
+void onLogoutFinished(const bool removed) {
+  if (removed) {
+    auto& servers = OPDS_STORE.getServers();
+    for (size_t i = 0; i < servers.size(); i++) {
+      if (servers[i].url == FOULAD_EBOOKS_URL) {
+        OPDS_STORE.removeServer(i);
+        break;
+      }
+    }
+  }
+  // Back where the user started the sign-out from.
+  activityManager.goToSettings();
+}
+}  // namespace
+
+void ActivityManager::goToLogout() {
+  std::string username;
+  std::string password;
+  for (const auto& server : OPDS_STORE.getServers()) {
+    if (server.url == FOULAD_EBOOKS_URL) {
+      username = server.username;
+      password = server.password;
+      break;
+    }
+  }
+  if (username.empty() || password.empty()) {
+    // Nothing to sign out of -- the entry was already removed, or never existed.
+    goToSettings();
+    return;
+  }
+  replaceActivity(std::make_unique<FouladLogoutActivity>(renderer, mappedInput, std::move(username),
+                                                         std::move(password), &onLogoutFinished));
 }
 
 void ActivityManager::goToNews() {

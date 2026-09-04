@@ -33,6 +33,14 @@ void silentRestartToFileTransfer();
 void silentRestartToFouladEbooks();
 void silentRestartToNews();  // Apps -> News (EINK_NEWS_TASKS.md)
 
+// Sign-out, same rationale as the flows above and for a measured reason: the
+// self-revoke POST is a TLS handshake, and reached from Settings with WiFi
+// already up it found 14,980 bytes free with a 9,716-byte largest block on an
+// X3 -- against the ~17KB contiguous a handshake needs. The connection could
+// not open at all, so sign-out reported a transport failure the user could do
+// nothing about. Rebooting first gives the handshake an unfragmented heap.
+void silentRestartToLogout();
+
 // Return-to-caller targets: a WiFi flow launched FROM this menu should land
 // back on it, not on Home, once its own onExit() silent-restarts to clear
 // heap fragmentation. Landing on Home instead of the caller was a real user

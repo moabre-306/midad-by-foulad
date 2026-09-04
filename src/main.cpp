@@ -230,7 +230,8 @@ constexpr uint32_t SILENT_REBOOT_TARGET_GYM = 6;
 constexpr uint32_t SILENT_REBOOT_TARGET_SETTINGS = 7;
 constexpr uint32_t SILENT_REBOOT_TARGET_DICTIONARY = 8;
 constexpr uint32_t SILENT_REBOOT_TARGET_NEWS = 9;
-constexpr uint32_t SILENT_REBOOT_TARGET_MAX = SILENT_REBOOT_TARGET_NEWS;
+constexpr uint32_t SILENT_REBOOT_TARGET_LOGOUT = 10;
+constexpr uint32_t SILENT_REBOOT_TARGET_MAX = SILENT_REBOOT_TARGET_LOGOUT;
 // Must always name the highest target above. The boot-time range check below uses it
 // to reject uninitialised RTC memory on a cold boot, and a target outside the range
 // is silently treated as 0 -- which is HOME. Adding a target without moving this
@@ -331,6 +332,16 @@ void silentRestartToFileTransfer() {
   silentRebootTarget = SILENT_REBOOT_TARGET_FILE_TRANSFER;
   silentRebootMagic = SILENT_REBOOT_MAGIC;
   LOG_DBG("MAIN", "Silent restart (target=file_transfer)");
+  GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
+  delay(50);
+  ESP.restart();
+}
+
+void silentRestartToLogout() {
+  if (deepSleepInProgress) return;  // sleeping supersedes the heap-defrag reboot
+  silentRebootTarget = SILENT_REBOOT_TARGET_LOGOUT;
+  silentRebootMagic = SILENT_REBOOT_MAGIC;
+  LOG_DBG("MAIN", "Silent restart (target=logout)");
   GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
   delay(50);
   ESP.restart();
@@ -892,6 +903,9 @@ void setup() {
     // allocations for the WiFi driver and TCP buffers, and a fragmented heap
     // makes page loads crawl. Settings reboots here before starting it.
     activityManager.goToFileTransfer();
+  } else if (resume == BootResume::Silent && snapshotTarget == SILENT_REBOOT_TARGET_LOGOUT) {
+    // Fresh heap for the sign-out handshake -- see silentRestartToLogout().
+    activityManager.goToLogout();
   } else if (resume == BootResume::Silent && snapshotTarget == SILENT_REBOOT_TARGET_NEWS) {
     // Same fresh-heap treatment as the catalog, for the same reasons: WiFi, feed
     // parsing and an EPUB download stacked on one session's heap.

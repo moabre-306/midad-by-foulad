@@ -1231,10 +1231,13 @@ void BaseTheme::drawOptionPopup(const GfxRenderer& renderer, const char* title, 
   const int selectionVPadding = metrics.optionPopupSelectionVPadding;
 
   const int optionLineHeight = renderer.getLineHeight(optionFontId);
-  const int titleLineHeight = renderer.getLineHeight(UI_12_FONT_ID);
+  // A caller with nothing to say in the title gets no title band at all, rather
+  // than an empty strip and a separator floating above the options.
+  const bool hasTitle = title != nullptr && title[0] != '\0';
+  const int titleLineHeight = hasTitle ? renderer.getLineHeight(UI_12_FONT_ID) : 0;
   const int rowHeight = optionLineHeight + selectionVPadding * 2;
 
-  int maxTextWidth = renderer.getTextWidth(UI_12_FONT_ID, title, EpdFontFamily::BOLD);
+  int maxTextWidth = hasTitle ? renderer.getTextWidth(UI_12_FONT_ID, title, EpdFontFamily::BOLD) : 0;
   for (const auto& opt : options) {
     int w = renderer.getTextWidth(optionFontId, opt.c_str(), optionStyle);
     if (w > maxTextWidth) maxTextWidth = w;
@@ -1244,7 +1247,7 @@ void BaseTheme::drawOptionPopup(const GfxRenderer& renderer, const char* title, 
   const int listHeight = rowHeight * optionCount + itemSpacing * (optionCount - 1);
   const int dialogW = std::min((maxTextWidth + innerPadding * 2 + selectionHPadding * 2) * 12 / 10,
                                pageWidth - metrics.optionPopupDialogSideMargin * 2);
-  const int contentHeight = titleLineHeight + metrics.optionPopupTitleGap + listHeight;
+  const int contentHeight = titleLineHeight + (hasTitle ? metrics.optionPopupTitleGap : 0) + listHeight;
   const int dialogH = contentHeight + innerPadding * 2;
   const int dialogX = (pageWidth - dialogW) / 2;
   const int dialogY = (pageHeight - dialogH) / 2;
@@ -1267,15 +1270,17 @@ void BaseTheme::drawOptionPopup(const GfxRenderer& renderer, const char* title, 
 
   int y = dialogY + innerPadding;
 
-  renderer.drawCenteredText(UI_12_FONT_ID, y, title, true, EpdFontFamily::BOLD);
-  y += titleLineHeight;
+  if (hasTitle) {
+    renderer.drawCenteredText(UI_12_FONT_ID, y, title, true, EpdFontFamily::BOLD);
+    y += titleLineHeight;
 
-  if (metrics.optionPopupTitleSeparator) {
-    const int sepY = y + metrics.optionPopupTitleGap / 2;
-    renderer.drawLine(dialogX + innerPadding, sepY, dialogX + dialogW - innerPadding, sepY, true);
+    if (metrics.optionPopupTitleSeparator) {
+      const int sepY = y + metrics.optionPopupTitleGap / 2;
+      renderer.drawLine(dialogX + innerPadding, sepY, dialogX + dialogW - innerPadding, sepY, true);
+    }
+
+    y += metrics.optionPopupTitleGap;
   }
-
-  y += metrics.optionPopupTitleGap;
 
   const int itemRectX = dialogX + innerPadding;
   const int itemRectW = dialogW - innerPadding * 2;

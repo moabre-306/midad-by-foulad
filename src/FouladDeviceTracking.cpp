@@ -30,8 +30,6 @@ bool wifiConnected() { return WiFi.status() == WL_CONNECTED; }
 namespace {
 constexpr char TAG[] = "FDT";
 
-std::string deviceLogEndpoint() { return std::string(FOULAD_EBOOKS_URL) + "/device-log"; }
-
 // Reserved for the device-stats upload returning on /devices/v1/heartbeat: skip
 // the books/reading-days arrays unless free heap comfortably covers
 // BOTH the actual current data size AND this fixed margin for whatever OPDS
@@ -217,8 +215,8 @@ bool uploadCrashReport(const std::string& username, const std::string& password)
       {"type", "crash"},
       {"firmware_version", crashedVersion.empty() ? CROSSPOINT_VERSION : crashedVersion}};
   std::string response;
-  const bool ok =
-      HttpDownloader::postFilesMultipart(deviceLogEndpoint(), files, fields, response, 20000, username, password);
+  const bool ok = HttpDownloader::postFilesMultipart(FOULAD_EBOOKS_DEVICE_LOG_URL, files, fields, response, 20000,
+                                                     username, password);
 
   if (!ok) {
     LOG_ERR(TAG, "Crash report upload failed (status=%d)", HttpDownloader::getLastFailure().detail);

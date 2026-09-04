@@ -98,6 +98,16 @@ if (parsedSize != fileSize) {
 
 ## `section.bin`
 
+### Version 43
+
+Version 43 keeps the version 42 serialized layout unchanged. It was bumped
+because parse *output* changed, not the format: unclosed HTML void elements
+(`<br>`, `<hr>`, `<img>`, ...) are now closed before expat sees them, so a
+chapter that previously failed to parse — and cached that failure — now lays
+out correctly. Without the bump those caches would never be rebuilt, and the
+fix could not reach any book already opened on the device, which is the case
+it exists for.
+
 ### Version 42
 
 Each file in `sections/*.bin` stores one laid-out spine section. The header is

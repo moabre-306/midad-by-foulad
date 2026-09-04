@@ -15,19 +15,22 @@ void ConfirmationActivity::onEnter() {
   lineHeight = renderer.getLineHeight(fontId);
   const int maxWidth = renderer.getScreenWidth() - (margin * 2);
 
-  if (!heading.empty()) {
-    safeHeading = renderer.truncatedText(fontId, heading.c_str(), maxWidth, EpdFontFamily::BOLD);
-  }
-  if (!body.empty()) {
-    safeBody = renderer.truncatedText(fontId, body.c_str(), maxWidth, EpdFontFamily::REGULAR);
-  }
+  // Wrapped, not truncated: these are whole sentences asking the user to decide
+  // something, and "Log out of Midad? You'll need to sign in ..." cut at the screen
+  // edge is exactly the half that does not tell them what happens.
+  safeHeading = heading;
+  safeBody = body;
 
   // Text sits in the upper part of the screen so the confirmation popup
   // (centered) doesn't cover it.
   startY = renderer.getScreenHeight() / 6;
 
+  // No title on the popup: the question is already on screen above it, wrapped and
+  // in full. Passing it here as well drew it twice -- once truncated behind, once
+  // unwrapped inside a dialog whose width is clamped to the screen, so it spilled
+  // out of both edges of the box.
   const char* options[] = {I18N.get(StrId::STR_CANCEL), I18N.get(StrId::STR_CONFIRM)};
-  confirmPopup.show(safeHeading.c_str(), options, 2, 0, [this](int idx) {
+  confirmPopup.show("", options, 2, 0, [this](int idx) {
     ActivityResult res;
     res.isCancelled = (idx != 1);
     setResult(std::move(res));
@@ -40,17 +43,16 @@ void ConfirmationActivity::onEnter() {
 void ConfirmationActivity::render(RenderLock&& lock) {
   renderer.clearScreen();
 
+  const int maxWidth = renderer.getScreenWidth() - (margin * 2);
   int currentY = startY;
-  LOG_DBG("CONF", "currentY: %d", currentY);
-  // Draw Heading
   if (!safeHeading.empty()) {
-    renderer.drawCenteredText(fontId, currentY, safeHeading.c_str(), true, EpdFontFamily::BOLD);
-    currentY += lineHeight + spacing;
+    currentY +=
+        renderer.drawCenteredTextWrapped(fontId, currentY, maxWidth, safeHeading.c_str(), 4, true, EpdFontFamily::BOLD);
+    currentY += spacing;
   }
 
-  // Draw Body
   if (!safeBody.empty()) {
-    renderer.drawCenteredText(fontId, currentY, safeBody.c_str(), true, EpdFontFamily::REGULAR);
+    renderer.drawCenteredTextWrapped(fontId, currentY, maxWidth, safeBody.c_str(), 4, true, EpdFontFamily::REGULAR);
   }
 
   if (confirmPopup.processRender(renderer, mappedInput)) return;
