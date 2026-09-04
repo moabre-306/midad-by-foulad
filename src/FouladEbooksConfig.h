@@ -27,7 +27,7 @@ constexpr char FOULAD_EBOOKS_URL[] = "https://api.midad.one/opds";
 // subscription, browsed by the same activity as the catalog -- News is a different
 // root, not a different browser. Entry ids live in their own namespace
 // ("urn:midad:feed:<id>"), which is why extractFouladBookId checks the prefix.
-constexpr char FOULAD_EBOOKS_NEWS_URL[] = "http://midad.one/opds/news";
+constexpr char FOULAD_EBOOKS_NEWS_URL[] = "https://midad.one/opds/news";
 
 // Downloaded news lives in its own folder rather than beside the books at the SD
 // root. It is not a book: it has no author, it is replaced wholesale every time you
