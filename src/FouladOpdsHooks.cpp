@@ -20,11 +20,19 @@ void reportDeviceTrackingOnConnect(const OpdsServer& server) {
   // for ANY OPDS server, Foulad eBooks or not.
   FouladDeviceTracking::flushPendingKOReaderSync();
 
-  // Core serves no device-telemetry routes: /opds/reading-stats, /opds/device-log
-  // and /opds/device-stats were legacy-only and were not carried over, so the
-  // uploads that used to round-robin here all answered 404. Crash reports and the
-  // debug log stay on SD untouched, waiting for /devices/v1/logs.
-  (void)server;
+  if (server.url != FOULAD_EBOOKS_URL) return;
+
+  // One heartbeat per connect. Since registerDevice was deleted this is the only
+  // thing that refreshes device_tokens.firmware_version, so an account otherwise
+  // shows whatever version the device paired with, forever. Cheap: a small JSON
+  // body, well inside Core's 30/min.
+  //
+  // Reading stats and the debug-log upload are NOT restored here. Their Core
+  // replacements (/reading/v1/events, /devices/v1/logs) need work this change
+  // does not do -- events need a trustworthy wall clock the X3 does not have.
+  FouladTelemetryGate::resetForNewConnection();
+  if (!FouladTelemetryGate::allow(millis())) return;
+  FouladDeviceTracking::sendHeartbeat(server.username, server.password);
 }
 
 void removeExistingNewsDownload(const std::string& filename) {

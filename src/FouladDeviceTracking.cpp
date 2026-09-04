@@ -16,6 +16,7 @@
 #include "KOReaderSyncClient.h"
 #include "MidadAppSettings.h"
 #include "RecentBooksStore.h"
+#include "network/CoreCaCerts.h"
 #include "network/HttpDownloader.h"
 #include "network/OtaUpdater.h"
 #include "reading/ReadingStatsStore.h"
@@ -202,29 +203,85 @@ bool uploadCrashReport(const std::string& username, const std::string& password)
   if (!wifiConnected() || username.empty() || password.empty()) return false;
   if (!Storage.exists(CRASH_REPORT_PATH)) return false;
 
-  const std::vector<std::pair<std::string, std::string>> files = {{"log", CRASH_REPORT_PATH}};
-  // The version that CRASHED, not the one uploading. A crash report queues on the SD
-  // card until the device is next online, by which time it may have updated -- so
-  // stamping CROSSPOINT_VERSION here attributes an old panic to a new release, which
-  // is exactly backwards for "did yesterday's RC break this". Observed: a 1.8.1 panic
-  // arriving labelled 1.8.5-rc. HalSystem writes the real one into the report at
-  // panic time; read it back out.
-  const std::string crashedVersion = readCrashReportVersion();
-  const std::vector<std::pair<std::string, std::string>> fields = {
-      {"serial_number", getSerialNumber()},
-      {"type", "crash"},
-      {"firmware_version", crashedVersion.empty() ? CROSSPOINT_VERSION : crashedVersion}};
-  std::string response;
-  const bool ok = HttpDownloader::postFilesMultipart(FOULAD_EBOOKS_DEVICE_LOG_URL, files, fields, response, 20000,
-                                                     username, password);
-
-  if (!ok) {
-    LOG_ERR(TAG, "Crash report upload failed (status=%d)", HttpDownloader::getLastFailure().detail);
+  // text/plain, not multipart: multipart only exists on the esp_http_client path,
+  // which verifies through the certificate bundle and cannot complete an ECDSA
+  // handshake to api.midad.one without attempting an RSA modexp it has no heap
+  // for (0x4290). The pinned wolfSSL transport has no multipart encoder, and the
+  // contract offers text/plain with ?type= precisely for callers like this.
+  HalFile f;
+  if (!Storage.openFileForRead(TAG, CRASH_REPORT_PATH, f)) return false;
+  const size_t size = f.size();
+  if (size == 0) return false;
+  if (size > FOULAD_CORE_LOG_MAX_BYTES) {
+    // 413 is checked against the declared length before a byte is buffered, so
+    // sending it would only waste a handshake. Crash reports are a few KB; this is
+    // a guard, not an expected path.
+    LOG_ERR(TAG, "Crash report too large to upload (%u bytes, cap %u)", (unsigned)size,
+            (unsigned)FOULAD_CORE_LOG_MAX_BYTES);
+    criticalDiagLog("crash report upload -> SKIPPED too large " + std::to_string(size));
+    return false;
   }
-  // Safe either way: this writes to /debug_log.txt, not the file just uploaded.
-  criticalDiagLog(ok ? "crash report upload -> ok"
-                     : "crash report upload -> FAIL status=" + std::to_string(HttpDownloader::getLastFailure().detail));
-  return ok;
+  std::string body;
+  body.resize(size);
+  if (f.read(&body[0], size) != static_cast<int>(size)) {
+    LOG_ERR(TAG, "Crash report read failed");
+    return false;
+  }
+
+  // The version that CRASHED is already the first line of the report (HalSystem
+  // writes it at panic time), which is what the contract asks for -- a log row
+  // carries no firmware field of its own, and stamping the RUNNING version would
+  // attribute an old panic to a new release. Observed: a 1.8.1 panic arriving
+  // labelled 1.8.5-rc.
+  std::string response;
+  const auto err =
+      HttpDownloader::postJsonWolf(std::string(FOULAD_CORE_LOGS_URL) + "?type=crash", body,
+                                   core_ca::kMidadCoreCaGtsRootR4, response, 20000, username, password, "text/plain");
+  const int status = HttpDownloader::getLastFailure().detail;
+  if (err == HttpDownloader::OK) {
+    // duplicate:true is success too -- byte-identical re-upload, nothing written.
+    criticalDiagLog("crash report upload -> ok");
+    return true;
+  }
+  LOG_ERR(TAG, "Crash report upload failed (status=%d)", status);
+  criticalDiagLog("crash report upload -> FAIL status=" + std::to_string(status));
+  return false;
+}
+
+// Refreshes what Core knows about this device. Since registerDevice was deleted,
+// this is the ONLY thing that updates device_tokens.firmware_version after
+// pairing -- without it the account shows whatever version was paired with,
+// forever.
+//
+// All fields optional, at least one required, body capped at 2 KB server-side.
+// Deliberately modest: no library listing, no settings dump, nothing that grows
+// with use.
+bool sendHeartbeat(const std::string& username, const std::string& password) {
+  if (telemetryRefused("heartbeat")) return false;
+  if (!wifiConnected() || username.empty() || password.empty()) return false;
+
+  JsonDocument doc;
+  doc["firmwareVersion"] = CROSSPOINT_VERSION;
+  doc["deviceName"] = displayName();
+  doc["freeHeapBytes"] = ESP.getFreeHeap();
+  doc["uptimeSeconds"] = millis() / 1000UL;
+  const int rssi = WiFi.RSSI();
+  if (rssi < 0 && rssi >= -127) doc["wifiRssi"] = rssi;
+
+  std::string body;
+  serializeJson(doc, body);
+
+  std::string response;
+  const auto err = HttpDownloader::postJsonWolf(FOULAD_CORE_HEARTBEAT_URL, body, core_ca::kMidadCoreCaGtsRootR4,
+                                                response, 15000, username, password);
+  if (err == HttpDownloader::OK) {
+    diagLog("heartbeat -> ok");
+    return true;
+  }
+  const int status = HttpDownloader::getLastFailure().detail;
+  LOG_ERR(TAG, "Heartbeat failed (status=%d)", status);
+  diagLog("heartbeat -> FAIL status=" + std::to_string(status));
+  return false;
 }
 
 }  // namespace FouladDeviceTracking

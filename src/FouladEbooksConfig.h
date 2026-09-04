@@ -85,7 +85,17 @@ constexpr char FOULAD_EBOOKS_READING_POSITION_URL[] = "https://midad.one/opds/re
 // has no such endpoint and 404'd every time. Core replaces it with
 // /devices/v1/logs; repointed here rather than removed so crash diagnostics keep
 // working in the meantime.
-constexpr char FOULAD_EBOOKS_DEVICE_LOG_URL[] = "https://midad.one/opds/device-log";
+// Core device telemetry (R18, live 2026-09-04, contract version
+// c1173627-bcb9-47d3-8f78-8c5f6e5672eb). Both take the device credential as Basic
+// auth and both go over the PINNED wolfSSL transport, never the certificate
+// bundle: api.midad.one's chain is ECDSA, and verifying it through the bundle
+// makes mbedTLS attempt an RSA modexp it cannot allocate (0x4290) -- the failure
+// that broke sign-out. Logs deliberately use the text/plain envelope rather than
+// multipart for the same reason: multipart only exists on the bundle path.
+constexpr char FOULAD_CORE_HEARTBEAT_URL[] = "https://api.midad.one/devices/v1/heartbeat";
+constexpr char FOULAD_CORE_LOGS_URL[] = "https://api.midad.one/devices/v1/logs";
+// Server-side cap; a larger body is rejected 413 before it is read.
+constexpr size_t FOULAD_CORE_LOG_MAX_BYTES = 65536;
 
 // Midad's own hosts. Matched on the host rather than on a
 // URL prefix because the requests that must carry the device serial header are

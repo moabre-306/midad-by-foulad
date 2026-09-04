@@ -210,7 +210,7 @@ class HttpDownloader {
    */
   static DownloadError postJsonWolf(const std::string& url, const std::string& jsonBody, const char* caAnchorsPem,
                                     std::string& outResponse, int timeoutMs = 15000, const std::string& username = {},
-                                    const std::string& password = {});
+                                    const std::string& password = {}, const char* contentType = "application/json");
 
   /**
    * HTTP DELETE with optional Basic Auth, buffering any (expected-small) response

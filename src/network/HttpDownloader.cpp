@@ -445,7 +445,8 @@ bool wolfReadChunked(VerifiedTlsSession& tls, std::string& out, uint8_t* buf, co
 
 HttpDownloader::DownloadError runPostJsonWolf(const std::string& url, const std::string& jsonBody,
                                               const char* caAnchorsPem, std::string& outResponse, const int timeoutMs,
-                                              const std::string& username, const std::string& password) {
+                                              const std::string& username, const std::string& password,
+                                              const char* contentType) {
   setLastFailure(HttpDownloader::FailStage::NONE, 0);
   outResponse.clear();
   WifiPowerSaveGuard psGuard;
@@ -492,7 +493,7 @@ HttpDownloader::DownloadError runPostJsonWolf(const std::string& url, const std:
   if (parts.port != 443) request += ":" + std::to_string(parts.port);
   request += "\r\n";
   request += "User-Agent: CrossPoint-ESP32-" CROSSPOINT_VERSION "\r\n";
-  request += "Content-Type: application/json\r\n";
+  request += std::string("Content-Type: ") + (contentType ? contentType : "application/json") + "\r\n";
   request += "Accept: application/json\r\n";
   // Same host-gated device identifier every other request carries, so
   // server-side revocation keeps working on this path too.
@@ -1954,10 +1955,10 @@ HttpDownloader::DownloadError HttpDownloader::postJson(const std::string& url, c
 HttpDownloader::DownloadError HttpDownloader::postJsonWolf(const std::string& url, const std::string& jsonBody,
                                                            const char* caAnchorsPem, std::string& outResponse,
                                                            int timeoutMs, const std::string& username,
-                                                           const std::string& password) {
+                                                           const std::string& password, const char* contentType) {
 #if defined(FREEINK_NET_WOLFSSL)
-  LOG_DBG("HTTP", "Posting JSON (wolfSSL, pinned anchors): %s", url.c_str());
-  return runPostJsonWolf(url, jsonBody, caAnchorsPem, outResponse, timeoutMs, username, password);
+  LOG_DBG("HTTP", "Posting (wolfSSL, pinned anchors): %s", url.c_str());
+  return runPostJsonWolf(url, jsonBody, caAnchorsPem, outResponse, timeoutMs, username, password, contentType);
 #else
   // Fail closed. Falling back to the bundle path would silently answer a
   // request for these anchors with a different trust decision.
@@ -1966,6 +1967,7 @@ HttpDownloader::DownloadError HttpDownloader::postJsonWolf(const std::string& ur
   (void)timeoutMs;
   (void)username;
   (void)password;
+  (void)contentType;
   outResponse.clear();
   LOG_ERR("HTTP", "wolfSSL transport not built in; refusing pinned POST: %s", url.c_str());
   return HTTP_ERROR;

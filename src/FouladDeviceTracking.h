@@ -48,4 +48,8 @@ void flushPendingKOReaderSync();
 // crash report file doesn't exist, or the upload ultimately fails.
 bool uploadCrashReport(const std::string& username, const std::string& password);
 
+// Refreshes firmware_version, device_name and a telemetry snapshot on Core.
+// The only thing that updates firmware_version after pairing.
+bool sendHeartbeat(const std::string& username, const std::string& password);
+
 }  // namespace FouladDeviceTracking
