@@ -30,6 +30,7 @@
 #include "home/FileBrowserActivity.h"
 #include "home/HomeActivity.h"
 #include "home/RecentBooksActivity.h"
+#include "network/BluetoothActivity.h"
 #include "network/CrossPointWebServerActivity.h"
 #include "reader/ReaderActivity.h"
 #include "settings/OpdsServerListActivity.h"
@@ -254,6 +255,10 @@ void ActivityManager::replaceActivity(std::unique_ptr<Activity>&& newActivity) {
 void ActivityManager::goToFileTransfer() {
   replaceActivity(std::make_unique<CrossPointWebServerActivity>(renderer, mappedInput));
 }
+
+void ActivityManager::goToPairing() { replaceActivity(std::make_unique<FouladQrLoginActivity>(renderer, mappedInput)); }
+
+void ActivityManager::goToBluetooth() { replaceActivity(std::make_unique<BluetoothActivity>(renderer, mappedInput)); }
 
 // The sole dispatch point every Settings entry funnels through. On
 // touch-capable boards this opens TouchSettingsActivity instead of

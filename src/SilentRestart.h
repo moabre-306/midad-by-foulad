@@ -41,6 +41,17 @@ void silentRestartToNews();  // Apps -> News (EINK_NEWS_TASKS.md)
 // nothing about. Rebooting first gives the handshake an unfragmented heap.
 void silentRestartToLogout();
 
+// Pairing (FouladQrLoginActivity), reached from the phone over BLE
+// (account.register). The reboot is what frees NimBLE's ~57KB and lets WiFi come
+// up for the device-login calls; the pairing code is still generated on and
+// displayed by the reader, never carried over BLE.
+void silentRestartToPairing();
+
+// Back to the Bluetooth screen once a WiFi service (file transfer / settings)
+// is closed from the phone, so the user can pick another service. BLE and WiFi
+// cannot be up together on the C3, so this is the return leg of the handover.
+void silentRestartToBluetooth();
+
 // Return-to-caller targets: a WiFi flow launched FROM this menu should land
 // back on it, not on Home, once its own onExit() silent-restarts to clear
 // heap fragmentation. Landing on Home instead of the caller was a real user

@@ -232,6 +232,7 @@ void CrossPointWebServer::begin() {
   server->on("/js/jszip.min.js", HTTP_GET, [this] { handleJszip(); });
 
   server->on("/api/status", HTTP_GET, [this] { handleStatus(); });
+  server->on("/api/session/close", HTTP_POST, [this] { handleSessionClose(); });
   server->on("/api/files", HTTP_GET, [this] { handleFileListData(); });
   server->on("/download", HTTP_GET, [this] { handleDownload(); });
 
@@ -2694,4 +2695,22 @@ void CrossPointWebServer::handleDictionaryDelete() {
     server->send(500, "application/json", "{\"error\":\"Delete failed\"}");
     LOG_ERR("WEB", "Failed to delete dictionary: %s", ifoPath.c_str());
   }
+}
+
+// POST /api/session/close -- the phone is done with this WiFi service and wants
+// the reader back on Bluetooth so another service can be chosen.
+//
+// Only the intent is recorded here. The restart happens in the activity loop
+// after the grace period, so this response is fully written to the socket first:
+// the app needs to distinguish a clean close from a crash, and it can only do
+// that if it actually receives the 200.
+void CrossPointWebServer::handleSessionClose() {
+  sessionClosePending = true;
+  sessionCloseAtMs = millis() + 600;
+  LOG_INF("WEBSRV", "session close requested; returning to Bluetooth shortly");
+  server->send(200, "application/json", "{\"ok\":true,\"closing\":true,\"returning_to\":\"bluetooth\"}");
+}
+
+bool CrossPointWebServer::sessionCloseDue() const {
+  return sessionClosePending && static_cast<long>(millis() - sessionCloseAtMs) >= 0;
 }

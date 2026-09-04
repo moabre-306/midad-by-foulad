@@ -68,7 +68,20 @@ class CrossPointWebServer {
   // Get the port number
   uint16_t getPort() const { return port; }
 
+  // True once POST /api/session/close has been answered and its grace period has
+  // elapsed. The phone ends a WiFi service this way so the reader can hand the
+  // radio back to Bluetooth and offer the next one; the caller acts on it by
+  // silent-restarting into the Bluetooth screen. Deferred rather than immediate
+  // so the HTTP response actually reaches the phone -- restarting inside the
+  // handler would cut the reply off mid-flight, and the app could not then tell
+  // a clean close from a crash.
+  bool sessionCloseDue() const;
+
  private:
+  // Set by handleSessionClose(); consumed by sessionCloseDue().
+  bool sessionClosePending = false;
+  unsigned long sessionCloseAtMs = 0;
+
   std::unique_ptr<WebServer> server = nullptr;
   std::unique_ptr<WebSocketsServer> wsServer = nullptr;
   bool running = false;
@@ -93,6 +106,7 @@ class CrossPointWebServer {
   void handleJszip() const;
   void handleNotFound() const;
   void handleStatus() const;
+  void handleSessionClose();
   void handleFileList() const;
   void handleFileListData() const;
   void handleDownload() const;

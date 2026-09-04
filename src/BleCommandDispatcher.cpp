@@ -340,6 +340,32 @@ size_t handleFilesOpen(char* outBuf, const size_t outBufLen) {
   return formatReply(outBuf, outBufLen, kCmd, "ok", nullptr);
 }
 
+// account.register: put the reader on its pairing screen so the phone can sign
+// this device in to an account, without the user hunting for it in the menus.
+//
+// Deliberately only a TRIGGER. The pairing code is generated on the reader and
+// displayed on its panel exactly as it always has been -- nothing about the code
+// travels over BLE. That matters: the bond here is LE Secure Connections but
+// "Just Works" (BlePeripheralManager.cpp:290-291, mitm=false with
+// NO_INPUT_OUTPUT), so it protects against eavesdropping but proves nothing
+// about WHICH peripheral the phone is talking to. Carrying the code over that
+// link would let an impostor advertising as this reader hand a phone a code it
+// minted, and the user would have no way to tell. Keeping the code on the panel
+// makes that attack pointless.
+//
+// Same deferred restart as files.open, for the same reason: the ack has to reach
+// the phone before the link drops.
+bool accountRegisterPending = false;
+unsigned long accountRegisterAtMs = 0;
+
+size_t handleAccountRegister(char* outBuf, const size_t outBufLen) {
+  constexpr char kCmd[] = "account.register";
+  accountRegisterPending = true;
+  accountRegisterAtMs = millis() + 600;
+  LOG_INF("BLECMD", "account.register accepted; entering pairing shortly");
+  return formatReply(outBuf, outBufLen, kCmd, "ok", nullptr);
+}
+
 size_t dispatch(const char* cmd, JsonVariantConst payload, char* outBuf, size_t outBufLen) {
   if (strcmp(cmd, "wifi.provision") == 0) {
     return handleWifiProvision(payload, outBuf, outBufLen);
@@ -356,7 +382,14 @@ size_t dispatch(const char* cmd, JsonVariantConst payload, char* outBuf, size_t 
   if (strcmp(cmd, "wifi.autoconnect") == 0) {
     return handleWifiAutoconnect(outBuf, outBufLen);
   }
-  if (strcmp(cmd, "files.open") == 0) {
+  if (strcmp(cmd, "account.register") == 0) {
+    return handleAccountRegister(outBuf, outBufLen);
+  }
+  // service.open is the same primitive under a truthful name: it starts the web
+  // server, which serves BOTH the file browser (/files) and device settings
+  // (/settings). The caller picks the page over HTTP afterwards. files.open is
+  // kept because it is already shipped and tested.
+  if (strcmp(cmd, "files.open") == 0 || strcmp(cmd, "service.open") == 0) {
     return handleFilesOpen(outBuf, outBufLen);
   }
   // Explicit reply, not silence -- an older reader talking to a newer phone app
@@ -368,6 +401,12 @@ size_t dispatch(const char* cmd, JsonVariantConst payload, char* outBuf, size_t 
 
 void pump() {
   // Deferred so the files.open reply is actually delivered before the reboot.
+  if (accountRegisterPending && static_cast<long>(millis() - accountRegisterAtMs) >= 0) {
+    accountRegisterPending = false;
+    LOG_INF("BLECMD", "account.register: restarting into pairing");
+    silentRestartToPairing();  // does not return
+    return;
+  }
   if (filesOpenPending && static_cast<long>(millis() - filesOpenAtMs) >= 0) {
     filesOpenPending = false;
     LOG_INF("BLECMD", "files.open: restarting into File Transfer");

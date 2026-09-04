@@ -322,6 +322,16 @@ void CrossPointWebServerActivity::loop() {
       dnsServer->processNextRequest();
     }
 
+    // The phone asked to end this service (POST /api/session/close). Hand the
+    // radio back to BLE so it can pick another one -- BLE and WiFi cannot be up
+    // together on the C3, so this has to be a full handover, not a mode switch.
+    if (webServer && webServer->sessionCloseDue()) {
+      LOG_INF("WEBACT", "Session closed by phone; returning to Bluetooth");
+      state = WebServerActivityState::SHUTTING_DOWN;
+      silentRestartToBluetooth();  // does not return
+      return;
+    }
+
     // STA mode: Monitor WiFi connection health
     if (!isApMode && webServer && webServer->isRunning()) {
       static unsigned long lastWifiCheck = 0;
