@@ -11,6 +11,7 @@
 #include <FontCacheManager.h>
 #include <GfxRenderer.h>
 #include <Logging.h>
+#include <WiFi.h>
 
 #include "I18n.h"
 #include "MappedInputManager.h"
@@ -53,8 +54,25 @@ void BluetoothActivity::onEnter() {
   if (auto* fcm = renderer.getFontCacheManager()) fcm->clearCache();
 
 #ifndef SIMULATOR
-  // This activity owns BLE's entire lifetime now -- see this class's own header
-  // comment. main.cpp's bleAllowedNow gate reacts on its own next tick.
+  // BLE and WiFi are mutually exclusive here: main.cpp's bleAllowedNow gate requires
+  // WiFi.getMode() == WIFI_MODE_NULL, so a radio left in STA mode by an earlier flow
+  // means begin() is never called and this screen sits on "Starting Bluetooth..."
+  // forever. Nothing logged it either, because the gate only reports on a TRANSITION
+  // and it never transitioned.
+  //
+  // Reproduced on the X3 by pairing, signing out and re-pairing (all of which leave
+  // WiFi up) and then opening this screen. Neither entry point -- the Apps tile nor
+  // Home's hold-Confirm shortcut -- powered the radio down, and only the Settings
+  // Wi-Fi screen ever did.
+  //
+  // This activity owns BLE's lifetime, so it owns the precondition too. Saved
+  // credentials auto-reconnect whenever a later flow needs WiFi.
+  if (WiFi.getMode() != WIFI_MODE_NULL) {
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    LOG_INF("BLE", "WiFi powered off so the radio can start");
+  }
+
   BlePeripheral.setUserRequested(true);
 #endif
 

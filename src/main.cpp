@@ -1035,6 +1035,27 @@ void loop() {
   } else if (BlePeripheral.isActive()) {
     BlePeripheral.end();
   }
+  // A request that the gate refuses used to be completely silent: the diagnostic
+  // below only fires when bleAllowedNow CHANGES, and a refusal that holds from the
+  // first tick never changes. That is what a user sees as "Starting Bluetooth..."
+  // with nothing in the log at all. Latched on the reason so it says why once,
+  // rather than every tick.
+  {
+    static int lastBlockReason = -1;
+    const int reason = !BlePeripheral.isUserRequested()     ? 0
+                       : WiFi.getMode() != WIFI_MODE_NULL   ? 1
+                       : activityManager.isReaderActivity() ? 2
+                                                            : 0;
+    if (reason != lastBlockReason) {
+      if (reason == 1) {
+        LOG_ERR("BLEDIAG", "BLE requested but refused: WiFi is up (mode=%d); it must be off",
+                static_cast<int>(WiFi.getMode()));
+      } else if (reason == 2) {
+        LOG_ERR("BLEDIAG", "BLE requested but refused: reader activity is active");
+      }
+      lastBlockReason = reason;
+    }
+  }
   BlePeripheral.poll();
   BleCommandDispatcher::pump();
   BleWifiScanCache::tick();
