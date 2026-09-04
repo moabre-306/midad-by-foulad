@@ -31,7 +31,12 @@ void reportDeviceTrackingOnConnect(const OpdsServer& server) {
   // replacements (/reading/v1/events, /devices/v1/logs) need work this change
   // does not do -- events need a trustworthy wall clock the X3 does not have.
   FouladTelemetryGate::resetForNewConnection();
-  if (!FouladTelemetryGate::allow(millis())) return;
+  if (!FouladTelemetryGate::allow(millis())) {
+    // Silence here meant a heartbeat that never fired looked identical to one
+    // that succeeded, since the success path only wrote to the SD debug log.
+    LOG_DBG("FOPDS", "heartbeat skipped: telemetry gate closed");
+    return;
+  }
   FouladDeviceTracking::sendHeartbeat(server.username, server.password);
 }
 

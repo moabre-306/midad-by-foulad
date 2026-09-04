@@ -68,8 +68,9 @@ void BluetoothActivity::onEnter() {
   // This activity owns BLE's lifetime, so it owns the precondition too. Saved
   // credentials auto-reconnect whenever a later flow needs WiFi.
   if (WiFi.getMode() != WIFI_MODE_NULL) {
-    WiFi.disconnect(true);
+    WiFi.disconnect(true);  // credentials are kept: eraseap defaults false
     WiFi.mode(WIFI_OFF);
+    poweredWifiDown_ = true;
     LOG_INF("BLE", "WiFi powered off so the radio can start");
   }
 
@@ -86,6 +87,18 @@ void BluetoothActivity::onExit() {
   // teardown itself happens via main.cpp's normal bleAllowedNow lifecycle on the
   // next tick, same as it always has.
   BlePeripheral.setUserRequested(false);
+
+  // Put the radio back the way we found it. Without this, leaving this screen
+  // left WiFi off with no indication, and the next screen that wanted the
+  // network looked simply broken -- reported from the device as "wifi didn't
+  // connect" after using BLE. Saved credentials are intact (disconnect(true)
+  // does not erase them), so begin() reconnects to the last network.
+  if (poweredWifiDown_) {
+    poweredWifiDown_ = false;
+    WiFi.mode(WIFI_STA);
+    WiFi.begin();
+    LOG_INF("BLE", "WiFi restored on leaving the Bluetooth screen");
+  }
 #endif
   Activity::onExit();
 }

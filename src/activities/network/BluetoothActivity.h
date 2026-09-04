@@ -39,6 +39,10 @@ class BluetoothActivity final : public Activity {
   // requests BLE on entry, so Off only appears for the brief window before begin()
   // completes -- rendered as Starting, same as before the radio has advertised yet).
   enum class UiState : uint8_t { Starting, Advertising, Connected, PausedLowMemory };
+  // True when onEnter() powered WiFi down to satisfy the BLE gate, so onExit()
+  // knows to put it back. Leaving the radio off surprises the user: every other
+  // screen that needs the network expects to find it as they left it.
+  bool poweredWifiDown_ = false;
   UiState currentUiState() const;
 
   // Last UiState this activity rendered -- render() redraws whenever it differs, the

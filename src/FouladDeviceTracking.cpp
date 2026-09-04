@@ -275,6 +275,7 @@ bool sendHeartbeat(const std::string& username, const std::string& password) {
   const auto err = HttpDownloader::postJsonWolf(FOULAD_CORE_HEARTBEAT_URL, body, core_ca::kMidadCoreCaGtsRootR4,
                                                 response, 15000, username, password);
   if (err == HttpDownloader::OK) {
+    LOG_INF(TAG, "Heartbeat accepted");
     diagLog("heartbeat -> ok");
     return true;
   }
