@@ -6,6 +6,7 @@
 #include <HalStorage.h>
 #include <Logging.h>
 #include <WiFi.h>
+#include <esp_mac.h>
 
 #include <cstdlib>
 
@@ -109,9 +110,23 @@ uint8_t arabicFontFamilyToDisplayIndex(const uint8_t stored) {
 }  // namespace
 
 std::string getSerialNumber() {
-  String mac = WiFi.macAddress();
-  mac.replace(":", "");
-  return std::string("XTE-") + mac.c_str();
+  // Read the MAC from efuse, NOT via WiFi.macAddress().
+  //
+  // WiFi.macAddress() returns all zeros until the WiFi driver has been
+  // initialised, so anything asking for the serial before the radio comes up got
+  // "XTE-000000000000". That is not hypothetical: KOSync's device identity is set
+  // once at boot (main.cpp), long before any WiFi, and every progress upload went
+  // out carrying the zero serial while pairing -- which happens with WiFi already
+  // up -- reported the real one. The account then had two different identifiers
+  // for one device, which is exactly what Core's position bridge keys on.
+  //
+  // esp_read_mac() reads the burned-in address directly and works at any point
+  // after boot, with or without a radio.
+  uint8_t mac[6] = {};
+  esp_read_mac(mac, ESP_MAC_WIFI_STA);
+  char buf[20];
+  snprintf(buf, sizeof(buf), "XTE-%02X%02X%02X%02X%02X%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  return std::string(buf);
 }
 
 void flushPendingKOReaderSync() {
