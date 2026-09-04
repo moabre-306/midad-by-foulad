@@ -46,6 +46,12 @@ const char* BluetoothActivity::wifiStatusText() {
     default:
       break;
   }
+
+  // Both machines are reset to Idle by consume(), which the dispatcher calls the
+  // moment the PHONE reads the result -- so a Done/Failed shown only from those
+  // states can vanish before the user has looked up. Fall back to what is
+  // actually true of the radio, which nothing else can clear.
+  if (WiFi.status() == WL_CONNECTED) return tr(STR_BLUETOOTH_WIFI_CONNECTED);
   return nullptr;
 }
 
@@ -191,6 +197,17 @@ void BluetoothActivity::loop() {
 #ifndef SIMULATOR
   // The radio machines advance on the main loop independently of BLE's own state,
   // so nothing else would repaint this screen while a scan or connect runs.
+  // Latch a failure the moment it is observable: consume() can clear it before
+  // the next repaint, and "it silently did nothing" is the worst thing this
+  // screen can say to someone whose Wi-Fi did not come up.
+  if (BleWifiAutoConnectCache::currentState() == BleWifiAutoConnectCache::State::Failed ||
+      BleWifiScanCache::currentState() == BleWifiScanCache::State::Failed) {
+    sawWifiFailure_ = true;
+  } else if (BleWifiAutoConnectCache::currentState() == BleWifiAutoConnectCache::State::Connecting ||
+             BleWifiScanCache::currentState() == BleWifiScanCache::State::Scanning) {
+    sawWifiFailure_ = false;  // a new attempt supersedes the old verdict
+  }
+
   const int wifiKey = wifiStateKey();
   if (wifiKey != lastRenderedWifiState_) {
     lastRenderedWifiState_ = wifiKey;
@@ -277,6 +294,7 @@ void BluetoothActivity::render(RenderLock&&) {
   // the Bluetooth link ended because WiFi took the radio, rather than because
   // something broke.
   const char* wifiText = wifiStatusText();
+  if (!wifiText && sawWifiFailure_) wifiText = tr(STR_BLUETOOTH_WIFI_FAILED);
   if (wifiText) {
     renderer.drawCenteredText(SMALL_FONT_ID, nextY, wifiText, true);
     nextY += renderer.getLineHeight(SMALL_FONT_ID) + 8;

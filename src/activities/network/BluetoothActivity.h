@@ -61,5 +61,8 @@ class BluetoothActivity final : public Activity {
   // Both machines folded into one comparable value, so a change repaints.
   static int wifiStateKey();
   int lastRenderedWifiState_ = -1;
+  // Survives consume() clearing the cache state, so a failed attempt stays on
+  // screen until the user starts another one.
+  bool sawWifiFailure_ = false;
 #endif
 };
