@@ -16,6 +16,7 @@
 #include "Epub/blocks/TextBlock.h"
 #include "Epub/css/CssParser.h"
 #include "Epub/css/CssStyle.h"
+#include "Epub/parsers/VoidElementNormalizer.h"
 
 class Page;
 class GfxRenderer;
@@ -138,6 +139,12 @@ class ChapterHtmlSlimParser {
   XML_Parser xmlParser_ = nullptr;
   HalFile parseFile_;
   uint32_t parseStartTime_ = 0;
+  // Raw file bytes are staged here and normalized into expat's own buffer.
+  // Heap, not stack: 1KB is far past the 256-byte local-variable budget.
+  std::unique_ptr<char[]> parseReadBuf_;
+  // Holds a tag split across a read boundary until the next chunk arrives.
+  char parseCarry_[void_elements::MAX_CARRY] = {};
+  size_t parseCarryLen_ = 0;
 
   void updateEffectiveInlineStyle();
   void startNewTextBlock(const BlockStyle& blockStyle);
