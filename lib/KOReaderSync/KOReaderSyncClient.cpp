@@ -12,9 +12,10 @@
 int KOReaderSyncClient::lastHttpCode = 0;
 
 namespace {
-// Device identifier for CrossPoint reader
-constexpr char DEVICE_NAME[] = "CrossPoint";
-constexpr char DEVICE_ID[] = "crosspoint-reader";
+// Defaults preserve the historical values for any build that never calls
+// setDeviceIdentity(); main.cpp replaces them with this unit's serial at boot.
+std::string gDeviceName = "CrossPoint";       // NOLINT(runtime/string)
+std::string gDeviceId = "crosspoint-reader";  // NOLINT(runtime/string)
 
 // KOSync's TLS-1.3 servers can't be reached through the precompiled system
 // mbedTLS (TLS 1.3 is stubbed out), so requests run over wolfSSL via
@@ -69,6 +70,11 @@ bool insufficientHeap() {
   return false;
 }
 }  // namespace
+
+void KOReaderSyncClient::setDeviceIdentity(const std::string& deviceId, const std::string& deviceName) {
+  if (!deviceId.empty()) gDeviceId = deviceId;
+  if (!deviceName.empty()) gDeviceName = deviceName;
+}
 
 KOReaderSyncClient::Error KOReaderSyncClient::authenticate() {
   lastHttpCode = 0;
@@ -246,8 +252,8 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateProgress(const KOReaderProgr
   }
   doc["progress"] = progress.progress;
   doc["percentage"] = progress.percentage;
-  doc["device"] = DEVICE_NAME;
-  doc["device_id"] = DEVICE_ID;
+  doc["device"] = gDeviceName;
+  doc["device_id"] = gDeviceId;
   if (progress.position.has_value() && KOREADER_STORE.usesCrossPointSyncServer()) {
     // CrossPoint-specific extension: do not send it to third-party KOSync servers.
     const auto& p = *progress.position;

@@ -68,6 +68,17 @@ struct PollResult {
   // user.name from the response, e.g. "Sameh" -- for a "Signed in as ..."
   // confirmation. Empty if the server didn't send one.
   std::string displayName;
+
+  // KOSync provisioning, from the response's optional `kosync` object. Core mints
+  // the KOSync credential at pairing (the password IS the device token), because
+  // there is no other channel: the firmware's only other writer of these is the
+  // Settings UI, and the server-pushed-settings path died with registerDevice.
+  // All empty when the server sends no `kosync` block, which is the pre-R19 case
+  // and must stay harmless.
+  std::string koUsername;
+  std::string koPassword;
+  std::string koServerUrl;
+  int koMatchMethod = -1;  // -1 = not sent; 0 = filename, 1 = binary
 };
 
 // Opens a pairing session. Sends this device's name/serial/model/firmware so

@@ -7,6 +7,7 @@
 #include <WiFi.h>
 
 #include "FouladEbooksConfig.h"
+#include "KOReaderCredentialStore.h"
 #include "MappedInputManager.h"
 #include "OpdsServerStore.h"
 #include "SilentRestart.h"
@@ -84,6 +85,20 @@ void FouladQrLoginActivity::pollOnce() {
       // fact would leave every pre-existing install unclassifiable.
       server.isDeviceToken = true;
       OPDS_STORE.addServer(server);  // persists to SD before the restart below
+
+      // KOSync, when Core provisioned it in the approval. Written here rather than
+      // inside the login module so that module stays a pure "get a credential"
+      // step. Self-revoke kills both credentials at once server-side, so they are
+      // deliberately established together.
+      if (!poll.koPassword.empty() && !poll.koServerUrl.empty()) {
+        KOREADER_STORE.setCredentials(poll.koUsername, poll.koPassword);
+        KOREADER_STORE.setServerUrl(poll.koServerUrl);
+        if (poll.koMatchMethod == 0 || poll.koMatchMethod == 1) {
+          KOREADER_STORE.setMatchMethod(static_cast<DocumentMatchMethod>(poll.koMatchMethod));
+        }
+        KOREADER_STORE.saveToFile();
+        LOG_INF("QRLOGIN", "KOSync configured for this account");
+      }
 
       LOG_INF("QRLOGIN", "Signed in as '%s'", poll.username.c_str());
       // Same fresh-heap handoff the typed-password path uses: boot routes into

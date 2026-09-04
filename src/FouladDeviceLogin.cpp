@@ -153,6 +153,18 @@ FouladDeviceLogin::PollResult FouladDeviceLogin::poll(const std::string& session
       result.status = PollStatus::Redeemed;
       return result;
     }
+    // Optional: absence is not an error, and every field is read independently so
+    // a partial block provisions what it can rather than nothing.
+    JsonObjectConst kosync = doc["kosync"].as<JsonObjectConst>();
+    if (!kosync.isNull()) {
+      result.koUsername = kosync["username"].as<std::string>();
+      result.koPassword = kosync["password"].as<std::string>();
+      result.koServerUrl = kosync["server_url"].as<std::string>();
+      if (kosync["match_method"].is<int>()) result.koMatchMethod = kosync["match_method"].as<int>();
+      // Never logged: koPassword is the device token by construction.
+      LOG_INF("QRLOGIN", "KOSync provisioning received (match_method=%d)", result.koMatchMethod);
+    }
+
     result.status = PollStatus::Approved;
     LOG_INF("QRLOGIN", "Approved for account '%s'", result.username.c_str());
     return result;

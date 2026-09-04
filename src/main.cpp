@@ -37,10 +37,12 @@
 #include "BleWifiScanCache.h"
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
+#include "FouladDeviceTracking.h"
 #include "GameHighScoresStore.h"
 #include "GymLogStore.h"
 #include "GymPlanStore.h"
 #include "KOReaderCredentialStore.h"
+#include "KOReaderSyncClient.h"
 #include "MappedInputManager.h"
 #include "MidadAppSettings.h"
 #include "OpdsServerStore.h"
@@ -622,6 +624,13 @@ void setupDisplayAndFonts(bool seamless = false, bool uiOnlyFonts = false) {
   if (MIDAD_APP_SETTINGS.quranEnabled) {
     QuranBook::ensureExtracted();
   }
+
+  // Give KOSync this unit's real identity before anything can sync. The library
+  // defaults are the historical compile-time constants, identical on every
+  // device; the serial is stable, unique, and the same string sent as the
+  // reading-position deviceId.
+  KOReaderSyncClient::setDeviceIdentity(FouladDeviceTracking::getSerialNumber(),
+                                        gpio.deviceIsX3() ? "Xteink X3" : "Xteink X4");
 
   LOG_DBG("MAIN", "Fonts setup");
 }

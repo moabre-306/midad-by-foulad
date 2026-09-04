@@ -107,4 +107,16 @@ class KOReaderSyncClient {
 
   /** HTTP status code from the last request (for diagnostics). */
   static int lastHttpCode;
+
+  /**
+   * Per-device identity sent with every progress upload.
+   *
+   * These were compile-time constants ("crosspoint-reader" / "CrossPoint"),
+   * identical on every device ever built. A sync server keying anything on
+   * device_id therefore saw one device per account no matter how many were
+   * paired, and KOReader's "synced from ..." could only ever name the model.
+   * Set once at boot from the real serial; the defaults remain the old constants
+   * so an unset build behaves as before rather than sending an empty id.
+   */
+  static void setDeviceIdentity(const std::string& deviceId, const std::string& deviceName);
 };
