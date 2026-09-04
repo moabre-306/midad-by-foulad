@@ -142,9 +142,9 @@ class ChapterHtmlSlimParser {
   // Raw file bytes are staged here and normalized into expat's own buffer.
   // Heap, not stack: 1KB is far past the 256-byte local-variable budget.
   std::unique_ptr<char[]> parseReadBuf_;
-  // Holds a tag split across a read boundary until the next chunk arrives.
-  char parseCarry_[void_elements::MAX_CARRY] = {};
-  size_t parseCarryLen_ = 0;
+  // Normalizer state: persists across reads so a tag, comment or CDATA split over
+  // a buffer boundary is not a special case.
+  void_elements::State parseNormalizer_;
 
   void updateEffectiveInlineStyle();
   void startNewTextBlock(const BlockStyle& blockStyle);

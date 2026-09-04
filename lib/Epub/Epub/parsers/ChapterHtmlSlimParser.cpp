@@ -2019,7 +2019,7 @@ bool ChapterHtmlSlimParser::beginParse() {
     xmlParser_ = nullptr;
     return false;
   }
-  parseCarryLen_ = 0;
+  parseNormalizer_ = void_elements::State{};
 
   // Get file size to decide whether to show indexing popup.
   if (popupFn && parseFile_.size() >= MIN_SIZE_FOR_POPUP) {
@@ -2045,8 +2045,8 @@ ChapterHtmlSlimParser::ParseStatus ChapterHtmlSlimParser::parseStep() {
   const int done = parseFile_.available() == 0;
 
   // Worst case the chunk is nothing but "<br>": one extra byte per four, plus a
-  // carried-over tag from the previous chunk flushed ahead of it.
-  const size_t outCap = len + void_elements::MAX_CARRY + void_elements::growthBound(len + void_elements::MAX_CARRY) + 8;
+  // tag buffered during an earlier read being flushed ahead of it.
+  const size_t outCap = len + void_elements::MAX_TAG + void_elements::growthBound(len + void_elements::MAX_TAG) + 8;
   void* const buf = XML_GetBuffer(xmlParser_, static_cast<int>(outCap));
   if (!buf) {
     LOG_ERR("EHP", "Couldn't allocate memory for buffer");
@@ -2056,8 +2056,8 @@ ChapterHtmlSlimParser::ParseStatus ChapterHtmlSlimParser::parseStep() {
   // Close unclosed HTML void elements (<br>, <hr>, <img>, ...). They are legal
   // HTML but not well-formed XML, and expat rejects the whole document over one
   // of them. Sideloaded books cannot be repaired any other way.
-  const size_t outLen = void_elements::normalize(parseReadBuf_.get(), len, static_cast<char*>(buf), outCap, parseCarry_,
-                                                 parseCarryLen_, done != 0);
+  const size_t outLen =
+      void_elements::normalize(parseReadBuf_.get(), len, static_cast<char*>(buf), outCap, parseNormalizer_, done != 0);
 
   if (XML_ParseBuffer(xmlParser_, static_cast<int>(outLen), done) == XML_STATUS_ERROR) {
     if (htmlEnded_) {
@@ -2082,7 +2082,7 @@ void ChapterHtmlSlimParser::abortParse() {
     parseFile_.close();
   }
   parseReadBuf_.reset();
-  parseCarryLen_ = 0;
+  parseNormalizer_ = void_elements::State{};
 }
 
 bool ChapterHtmlSlimParser::finishParse() {
@@ -2093,7 +2093,7 @@ bool ChapterHtmlSlimParser::finishParse() {
   }
   parseFile_.close();
   parseReadBuf_.reset();
-  parseCarryLen_ = 0;
+  parseNormalizer_ = void_elements::State{};
 
   // Process last page if there is still text
   if (currentTextBlock) {
