@@ -186,9 +186,8 @@ void CrossPointWebServerActivity::reportDeviceTrackingOnConnect() {
   const auto& servers = OPDS_STORE.getServers();
   const auto it =
       std::find_if(servers.begin(), servers.end(), [](const OpdsServer& s) { return s.url == FOULAD_EBOOKS_URL; });
-  if (it == servers.end()) return;  // no Foulad eBooks account configured -- nothing to register with
+  if (it == servers.end()) return;  // no Foulad eBooks account configured -- nothing to report to
 
-  FouladDeviceTracking::registerDevice(it->username, it->password);
   FouladDeviceTracking::reportDeviceStats(it->username, it->password);
 }
 

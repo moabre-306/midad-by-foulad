@@ -30,7 +30,6 @@ bool wifiConnected() { return WiFi.status() == WL_CONNECTED; }
 namespace {
 constexpr char TAG[] = "FDT";
 
-std::string deviceEndpoint() { return std::string(FOULAD_EBOOKS_URL) + "/device"; }
 std::string readingStatsEndpoint() { return std::string(FOULAD_EBOOKS_URL) + "/reading-stats"; }
 std::string deviceLogEndpoint() { return std::string(FOULAD_EBOOKS_URL) + "/device-log"; }
 std::string deviceStatsEndpoint() { return std::string(FOULAD_EBOOKS_URL) + "/device-stats"; }
@@ -109,308 +108,6 @@ uint8_t arabicFontFamilyToDisplayIndex(const uint8_t stored) {
     if (kArabicFontDisplayToStored[i] == stored) return i;
   }
   return 0;  // stale/legacy value (e.g. removed Amiri=1) or out of range
-}
-
-// Current settings, for the "My Devices" web editor's display only (EINK_SETTINGS_
-// SYNC_TASKS.md PART 1) -- never affects what gets pushed back. Every key here must
-// match CrossPointSettings'/KOReaderCredentialStore's own field name exactly; see
-// applySettingsFromServer() below for the reverse direction and why arabicFontFamily
-// needs translation but every other field doesn't.
-void addSettingsReport(JsonObject settings) {
-  const auto& s = SETTINGS;
-  // Display
-  settings["sleepScreen"] = s.sleepScreen;
-  settings["sleepScreenCoverMode"] = s.sleepScreenCoverMode;
-  settings["sleepScreenCoverFilter"] = s.sleepScreenCoverFilter;
-  settings["quickResumeSleepScreen"] = s.quickResumeSleepScreen;
-  settings["hideBatteryPercentage"] = s.hideBatteryPercentage;
-  settings["refreshFrequency"] = s.refreshFrequency;
-  settings["fadingFix"] = s.fadingFix;
-  settings["darkModeEnabled"] = s.darkModeEnabled;
-  // Reader
-  settings["fontFamily"] = s.fontFamily;
-  settings["fontSize"] = s.fontPointSize;
-  settings["arabicFontFamily"] = arabicFontFamilyToDisplayIndex(s.arabicFontFamily);
-  settings["arabicFontSize"] = s.arabicFontSize;
-  settings["lineSpacing"] = s.lineSpacing;
-  settings["screenMargin"] = s.screenMargin;
-  settings["paragraphAlignment"] = s.paragraphAlignment;
-  settings["orientation"] = s.orientation;
-  settings["embeddedStyle"] = s.embeddedStyle;
-  settings["focusReadingEnabled"] = s.focusReadingEnabled;
-  settings["hyphenationEnabled"] = s.hyphenationEnabled;
-  settings["extraParagraphSpacing"] = s.extraParagraphSpacing;
-  settings["textAntiAliasing"] = s.textAntiAliasing;
-  settings["imageRendering"] = s.imageRendering;
-  settings["trackReadingStats"] = s.trackReadingStats;
-  settings["dailyReadingGoal"] = s.dailyReadingGoal;
-  // Controls
-  settings["sideButtonLayout"] = s.sideButtonLayout;
-  settings["frontButtonFollowOrientation"] = s.frontButtonFollowOrientation;
-  settings["longPressButtonBehavior"] = s.longPressButtonBehavior;
-  settings["longPressMenuFunction"] = s.longPressMenuFunction;
-  settings["shortPwrBtn"] = s.shortPwrBtn;
-  settings["pwrBtnFootnoteBack"] = s.pwrBtnFootnoteBack;
-  settings["tiltPageTurn"] = s.tiltPageTurn;
-  // Apps -- MidadAppSettings, a separate store (see src/MidadAppSettings.h);
-  // wire key names are unchanged from their old life on CrossPointSettings.
-  const auto& m = MIDAD_APP_SETTINGS;
-  settings["quranEnabled"] = m.quranEnabled;
-  settings["rssEnabled"] = m.rssEnabled;
-  settings["gamesEnabled"] = m.gamesEnabled;
-  settings["tasbihEnabled"] = m.tasbihEnabled;
-  settings["stopwatchEnabled"] = m.stopwatchEnabled;
-  settings["gymEnabled"] = m.gymEnabled;
-  settings["gymWeightUnit"] = m.gymWeightUnit;
-  settings["debugLoggingEnabled"] = m.debugLoggingEnabled;
-  // System
-  settings["sleepTimeoutMinutes"] = s.sleepTimeoutMinutes;
-  settings["showHiddenFiles"] = s.showHiddenFiles;
-  settings["removeReadBooksFromRecents"] = s.removeReadBooksFromRecents;
-  settings["moveFinishedToReadFolder"] = s.moveFinishedToReadFolder;
-  // Status Bar
-  settings["statusBarChapterPageCount"] = s.statusBarChapterPageCount;
-  settings["statusBarBookProgressPercentage"] = s.statusBarBookProgressPercentage;
-  settings["statusBarProgressBar"] = s.statusBarProgressBar;
-  settings["statusBarProgressBarThickness"] = s.statusBarProgressBarThickness;
-  settings["statusBarTitle"] = s.statusBarTitle;
-  settings["statusBarBattery"] = s.statusBarBattery;
-  settings["xtcStatusBarMode"] = s.xtcStatusBarMode;
-  settings["statusBarClock"] = s.statusBarClock;
-  settings["clockUtcOffsetQ"] = s.clockUtcOffsetQ;
-  settings["clockFormat"] = s.clockFormat;
-  settings["clockHasBeenSynced"] = s.clockHasBeenSynced;
-  // KOReader Sync -- never report koPassword (write-only from the web side).
-  settings["koUsername"] = KOREADER_STORE.getUsername();
-  settings["koServerUrl"] = KOREADER_STORE.getServerUrl();
-  settings["koMatchMethod"] = static_cast<uint8_t>(KOREADER_STORE.getMatchMethod());
-}
-
-// Applies whatever the user configured via the "My Devices" web page (EINK_SETTINGS_
-// SYNC_TASKS.md PART 2), from the same POST /opds/device response. `settings` is {}
-// (no keys) until the user saves that page at least once -- every per-field lookup
-// below then naturally misses and changes nothing, so no separate "is this empty"
-// branch is needed. Unknown/out-of-range values are silently skipped, same tolerance
-// as the server side. Persists via CrossPointSettings::saveToFile() (and
-// KOReaderCredentialStore::saveToFile() for ko* keys) only if something actually
-// changed -- mirrors this project's usual SPIFFS/SD write-throttling convention,
-// even though this only runs once per Foulad eBooks connection, not per keystroke.
-void applySettingsFromServer(JsonObjectConst settings) {
-  if (settings.isNull()) return;
-
-  auto& s = SETTINGS;
-  using S = CrossPointSettings;
-  bool changed = false;
-
-  auto applyEnum = [&](uint8_t& field, const char* key, const uint8_t count) {
-    const JsonVariantConst v = settings[key];
-    if (v.isNull()) return;
-    const uint8_t val = v.as<uint8_t>();
-    if (val >= count) return;
-    if (field != val) {
-      field = val;
-      changed = true;
-    }
-  };
-  auto applyToggle = [&](uint8_t& field, const char* key) {
-    const JsonVariantConst v = settings[key];
-    if (v.isNull()) return;
-    const uint8_t val = v.as<uint8_t>() != 0 ? 1 : 0;
-    if (field != val) {
-      field = val;
-      changed = true;
-    }
-  };
-  auto applyRange = [&](uint8_t& field, const char* key, const uint8_t lo, const uint8_t hi) {
-    const JsonVariantConst v = settings[key];
-    if (v.isNull()) return;
-    const uint8_t val = v.as<uint8_t>();
-    if (val < lo || val > hi) return;
-    if (field != val) {
-      field = val;
-      changed = true;
-    }
-  };
-
-  applyEnum(s.sleepScreen, "sleepScreen", S::SLEEP_SCREEN_MODE_COUNT);
-  applyEnum(s.sleepScreenCoverMode, "sleepScreenCoverMode", S::SLEEP_SCREEN_COVER_MODE_COUNT);
-  applyEnum(s.sleepScreenCoverFilter, "sleepScreenCoverFilter", S::SLEEP_SCREEN_COVER_FILTER_COUNT);
-  applyEnum(s.quickResumeSleepScreen, "quickResumeSleepScreen", S::QUICK_RESUME_SLEEP_SCREEN_COUNT);
-  applyEnum(s.hideBatteryPercentage, "hideBatteryPercentage", S::HIDE_BATTERY_PERCENTAGE_COUNT);
-  applyEnum(s.refreshFrequency, "refreshFrequency", S::REFRESH_FREQUENCY_COUNT);
-  applyToggle(s.fadingFix, "fadingFix");
-  applyToggle(s.darkModeEnabled, "darkModeEnabled");
-
-  // fontFamily/arabicFontFamily: the web only offers built-in options, which must
-  // take priority over any SD font currently selected or the pushed change would
-  // appear to silently do nothing (SD name wins when non-empty) -- clearing it
-  // mirrors SettingsList.h's own valueSetter for these two fields.
-  {
-    const JsonVariantConst v = settings["fontFamily"];
-    if (!v.isNull()) {
-      const uint8_t val = v.as<uint8_t>();
-      if (val < S::FONT_FAMILY_COUNT && (s.fontFamily != val || s.sdFontFamilyName[0] != '\0')) {
-        s.fontFamily = val;
-        s.sdFontFamilyName[0] = '\0';
-        changed = true;
-      }
-    }
-  }
-  {
-    const JsonVariantConst v = settings["arabicFontFamily"];
-    if (!v.isNull()) {
-      const uint8_t displayIdx = v.as<uint8_t>();
-      if (displayIdx < kArabicFontDisplayCount) {
-        const uint8_t val = kArabicFontDisplayToStored[displayIdx];
-        if (s.arabicFontFamily != val || s.sdArabicFontFamilyName[0] != '\0') {
-          s.arabicFontFamily = val;
-          s.sdArabicFontFamilyName[0] = '\0';
-          changed = true;
-        }
-      }
-    }
-  }
-
-  // fontSize (wire key, unchanged) is now a point size, not a bounded enum slot --
-  // an out-of-range/unavailable value is made safe at load/render time by
-  // snapToNearestPointSize() (see SdCardFontSystem::ensureLoaded), so a plain
-  // sanity range is enough here rather than an exact enum-count bound.
-  applyRange(s.fontPointSize, "fontSize", 6, 72);
-  applyEnum(s.arabicFontSize, "arabicFontSize", S::FONT_SIZE_COUNT);
-  applyEnum(s.lineSpacing, "lineSpacing", S::LINE_COMPRESSION_COUNT);
-  applyRange(s.screenMargin, "screenMargin", 5, 40);
-  applyEnum(s.paragraphAlignment, "paragraphAlignment", S::PARAGRAPH_ALIGNMENT_COUNT);
-  applyEnum(s.orientation, "orientation", S::ORIENTATION_COUNT);
-  applyToggle(s.embeddedStyle, "embeddedStyle");
-  applyToggle(s.focusReadingEnabled, "focusReadingEnabled");
-  applyToggle(s.hyphenationEnabled, "hyphenationEnabled");
-  applyToggle(s.extraParagraphSpacing, "extraParagraphSpacing");
-  applyToggle(s.textAntiAliasing, "textAntiAliasing");
-  applyEnum(s.imageRendering, "imageRendering", S::IMAGE_RENDERING_COUNT);
-  applyToggle(s.trackReadingStats, "trackReadingStats");
-  applyRange(s.dailyReadingGoal, "dailyReadingGoal", 0, 5);
-
-  applyEnum(s.sideButtonLayout, "sideButtonLayout", S::SIDE_BUTTON_LAYOUT_COUNT);
-  applyToggle(s.frontButtonFollowOrientation, "frontButtonFollowOrientation");
-  applyEnum(s.longPressButtonBehavior, "longPressButtonBehavior", S::LONG_PRESS_BUTTON_BEHAVIOR_COUNT);
-  applyEnum(s.longPressMenuFunction, "longPressMenuFunction", S::LONG_PRESS_MENU_FUNCTION_COUNT);
-  applyEnum(s.shortPwrBtn, "shortPwrBtn", S::SHORT_PWRBTN_COUNT);
-  applyToggle(s.pwrBtnFootnoteBack, "pwrBtnFootnoteBack");
-  applyEnum(s.tiltPageTurn, "tiltPageTurn", S::TILT_PAGE_TURN_COUNT);
-
-  applyRange(s.sleepTimeoutMinutes, "sleepTimeoutMinutes", S::MIN_SLEEP_TIMEOUT_MINUTES, S::MAX_SLEEP_TIMEOUT_MINUTES);
-  applyToggle(s.showHiddenFiles, "showHiddenFiles");
-  applyToggle(s.removeReadBooksFromRecents, "removeReadBooksFromRecents");
-  applyToggle(s.moveFinishedToReadFolder, "moveFinishedToReadFolder");
-
-  applyToggle(s.statusBarChapterPageCount, "statusBarChapterPageCount");
-  applyToggle(s.statusBarBookProgressPercentage, "statusBarBookProgressPercentage");
-  applyEnum(s.statusBarProgressBar, "statusBarProgressBar", S::STATUS_BAR_PROGRESS_BAR_COUNT);
-  applyEnum(s.statusBarProgressBarThickness, "statusBarProgressBarThickness",
-            S::STATUS_BAR_PROGRESS_BAR_THICKNESS_COUNT);
-  applyEnum(s.statusBarTitle, "statusBarTitle", S::STATUS_BAR_TITLE_COUNT);
-  applyToggle(s.statusBarBattery, "statusBarBattery");
-  applyEnum(s.xtcStatusBarMode, "xtcStatusBarMode", S::XTC_STATUS_BAR_MODE_COUNT);
-  applyEnum(s.statusBarClock, "statusBarClock", 3);  // STATUS_BAR_CLOCK_MODE has no _COUNT sentinel
-  applyRange(s.clockUtcOffsetQ, "clockUtcOffsetQ", 0, 104);
-  applyEnum(s.clockFormat, "clockFormat", 2);  // plain 0/1 field, not a named enum
-  applyToggle(s.clockHasBeenSynced, "clockHasBeenSynced");
-
-  if (changed) {
-    s.saveToFile();
-    diagLog("applied pushed settings from server");
-  }
-
-  // Apps -- separate store/file (MidadAppSettings), same reasoning as KOReader
-  // Sync below: its own changed-flag and saveToFile() so an unrelated push
-  // doesn't force-touch this file. Note: pomodoroEnabled/pomodoroFocusMin/
-  // pomodoroShortBreakMin/pomodoroLongBreakMin are not wired here -- they
-  // never were (addSettingsReport() doesn't report them either), so this
-  // preserves that pre-existing gap rather than adding new wire behavior.
-  {
-    auto& m = MIDAD_APP_SETTINGS;
-    bool midadAppsChanged = false;
-    auto applyMidadToggle = [&](uint8_t& field, const char* key) {
-      const JsonVariantConst v = settings[key];
-      if (v.isNull()) return;
-      const uint8_t val = v.as<uint8_t>() != 0 ? 1 : 0;
-      if (field != val) {
-        field = val;
-        midadAppsChanged = true;
-      }
-    };
-    auto applyMidadEnum = [&](uint8_t& field, const char* key, const uint8_t count) {
-      const JsonVariantConst v = settings[key];
-      if (v.isNull()) return;
-      const uint8_t val = v.as<uint8_t>();
-      if (val >= count) return;
-      if (field != val) {
-        field = val;
-        midadAppsChanged = true;
-      }
-    };
-    applyMidadToggle(m.quranEnabled, "quranEnabled");
-    applyMidadToggle(m.rssEnabled, "rssEnabled");
-    applyMidadToggle(m.gamesEnabled, "gamesEnabled");
-    applyMidadToggle(m.tasbihEnabled, "tasbihEnabled");
-    applyMidadToggle(m.stopwatchEnabled, "stopwatchEnabled");
-    applyMidadToggle(m.gymEnabled, "gymEnabled");
-    applyMidadEnum(m.gymWeightUnit, "gymWeightUnit", MidadAppSettings::GYM_WEIGHT_UNIT_COUNT);
-    applyMidadToggle(m.debugLoggingEnabled, "debugLoggingEnabled");
-    if (midadAppsChanged) {
-      m.saveToFile();
-      diagLog("applied pushed Apps settings from server");
-    }
-  }
-
-  // KOReader Sync -- separate store/file, each field applied independently so
-  // an unrelated change (e.g. matchMethod) doesn't force-touch credentials.
-  bool koChanged = false;
-  {
-    std::string koUser = KOREADER_STORE.getUsername();
-    std::string koPass = KOREADER_STORE.getPassword();
-    bool credentialsChanged = false;
-    const JsonVariantConst userV = settings["koUsername"];
-    if (!userV.isNull() && userV.as<std::string>() != koUser) {
-      koUser = userV.as<std::string>();
-      credentialsChanged = true;
-    }
-    // Empty/omitted koPassword means "leave unchanged" (EINK_SETTINGS_SYNC_TASKS.md) --
-    // never let a blank value clear a stored password.
-    const JsonVariantConst passV = settings["koPassword"];
-    if (!passV.isNull()) {
-      const std::string val = passV.as<std::string>();
-      if (!val.empty() && val != koPass) {
-        koPass = val;
-        credentialsChanged = true;
-      }
-    }
-    if (credentialsChanged) {
-      KOREADER_STORE.setCredentials(koUser, koPass);
-      koChanged = true;
-    }
-  }
-  {
-    const JsonVariantConst v = settings["koServerUrl"];
-    if (!v.isNull() && v.as<std::string>() != KOREADER_STORE.getServerUrl()) {
-      KOREADER_STORE.setServerUrl(v.as<std::string>());
-      koChanged = true;
-    }
-  }
-  {
-    const JsonVariantConst v = settings["koMatchMethod"];
-    if (!v.isNull()) {
-      const uint8_t val = v.as<uint8_t>();
-      if (val <= 1 && static_cast<uint8_t>(KOREADER_STORE.getMatchMethod()) != val) {
-        KOREADER_STORE.setMatchMethod(static_cast<DocumentMatchMethod>(val));
-        koChanged = true;
-      }
-    }
-  }
-  if (koChanged) {
-    KOREADER_STORE.saveToFile();
-    diagLog("applied pushed KOReader settings from server");
-  }
 }
 
 // Single attempt, no 404 handling -- reportReadingStats() (below) is the only
@@ -498,109 +195,6 @@ std::string getSerialNumber() {
   return std::string("XTE-") + mac.c_str();
 }
 
-// Resolved once per registration: the build to offer, or empty for "nothing to say".
-// A std::string rather than a pointer into the response -- responseDoc dies with the
-// call and the Library reads this minutes later.
-static std::string latestFirmwareOffer;
-
-// Picks this device's channel out of {"stable", "rc"} and keeps the tag only if it
-// beats the running build.
-//
-// Channel comes from Settings -> System -> Pre-release (otaPrereleaseEnabled), which is
-// what "Check for Update" has always obeyed (OtaUpdater::checkForUpdate). This path used
-// to ignore that toggle and infer the channel from whether the RUNNING build had "-rc" in
-// its version instead, on the reasoning that a device running a release had opted out of
-// pre-releases by doing so. That was wrong once an explicit opt-in existed: someone on a
-// stable build who ticks Pre-release got RC offers from Check for Update and never from
-// Library, so the toggle silently did nothing here -- reported as the Library check being
-// broken.
-//
-// A device already running an -rc still gets rc offers whatever the toggle says: it is on
-// that channel already, and the alternative is stranding it there with no route forward.
-// Either way the stable tag remains the fallback, which is what carries an RC device off a
-// pre-release once the equal-numbered release lands.
-// Every outcome below is recorded to the SD debug log, not just the one that produces an
-// offer. From outside the device "the server named nothing" and "the server named a build
-// that is not newer than this one" are the same observation -- no popup -- but they are
-// completely different problems, and telling them apart is otherwise impossible after the
-// fact: the LOG_INF here reaches serial only, which nobody has attached while actually
-// using the device. A report that the Library update check "stopped working" is
-// unanswerable without this line.
-static void captureLatestFirmware(JsonVariantConst latest) {
-  latestFirmwareOffer.clear();
-
-  const auto tagOf = [](JsonVariantConst v) -> const char* {
-    return v.is<const char*>() ? v.as<const char*>() : nullptr;
-  };
-  const auto orNone = [](const char* s) { return s ? s : "(none)"; };
-
-  if (latest.isNull()) {
-    // Older server, or a current one that could not reach GitHub. Absent means "no
-    // information", never "up to date".
-    diagLog(std::string("firmware check: server sent no latest_firmware (running ") + CROSSPOINT_VERSION + ")");
-    return;
-  }
-
-  const char* rcTag = tagOf(latest["rc"]);
-  const char* stableTag = tagOf(latest["stable"]);
-
-  const auto newerOrNull = [&tagOf](JsonVariantConst v) -> const char* {
-    const char* tag = tagOf(v);
-    return OtaUpdater::isVersionNewer(tag) ? tag : nullptr;
-  };
-
-  const bool wantsPrerelease = SETTINGS.otaPrereleaseEnabled != 0 || strstr(CROSSPOINT_VERSION, "-rc") != nullptr;
-
-  const char* offer = nullptr;
-  if (wantsPrerelease) offer = newerOrNull(latest["rc"]);
-  if (offer == nullptr) offer = newerOrNull(latest["stable"]);
-  if (offer == nullptr) {
-    // The channel is logged too: "rc names a newer build but this device is on the stable
-    // channel" and "rc names nothing" both end here, and only the toggle's state separates
-    // them.
-    diagLog(std::string("firmware check: rc=") + orNone(rcTag) + " stable=" + orNone(stableTag) +
-            " channel=" + (wantsPrerelease ? "pre" : "stable") + " -- none newer than " + CROSSPOINT_VERSION);
-    return;
-  }
-
-  latestFirmwareOffer = offer;
-  diagLog(std::string("firmware check: offering ") + offer + " (rc=" + orNone(rcTag) + " stable=" + orNone(stableTag) +
-          " channel=" + (wantsPrerelease ? "pre" : "stable") + ", running " + CROSSPOINT_VERSION + ")");
-  LOG_INF(TAG, "Server reports newer firmware: %s (running %s)", offer, CROSSPOINT_VERSION);
-}
-
-void registerDevice(const std::string& username, const std::string& password) {
-  if (telemetryRefused("registration")) return;
-
-  if (!wifiConnected() || username.empty() || password.empty()) return;
-
-  JsonDocument doc;
-  doc["serial_number"] = getSerialNumber();
-  doc["name"] = displayName();
-  doc["model"] = modelName();
-  doc["firmware_version"] = CROSSPOINT_VERSION;
-  addSettingsReport(doc["settings"].to<JsonObject>());
-  std::string body;
-  serializeJson(doc, body);
-
-  std::string response;
-  const auto result = HttpDownloader::postJson(deviceEndpoint(), body, username, password, response);
-  if (result != HttpDownloader::OK) {
-    const int status = HttpDownloader::getLastFailure().detail;
-    LOG_ERR(TAG, "Device registration failed (status=%d)", status);
-    diagLog("register serial=" + getSerialNumber() + " -> FAIL status=" + std::to_string(status));
-    return;
-  }
-  LOG_DBG(TAG, "Device registered: %s", response.c_str());
-  diagLog("register serial=" + getSerialNumber() + " -> ok");
-
-  JsonDocument responseDoc;
-  if (!deserializeJson(responseDoc, response)) {
-    applySettingsFromServer(responseDoc["settings"].as<JsonObjectConst>());
-    captureLatestFirmware(responseDoc["latest_firmware"]);
-  }
-}
-
 void reportReadingStats(const std::string& username, const std::string& password, const std::string& fouladBookId,
                         const int progressPercent, const std::string& lastPosition, const uint32_t secondsRead) {
   if (telemetryRefused("reading-stats")) return;
@@ -611,14 +205,6 @@ void reportReadingStats(const std::string& username, const std::string& password
     return;
   }
 
-  const auto failure = HttpDownloader::getLastFailure();
-  if (failure.stage == HttpDownloader::FailStage::STATUS && failure.detail == 404) {
-    // Unknown device server-side -- register once, then retry exactly once.
-    LOG_DBG(TAG, "Reading-stats 404 (device not registered yet), registering and retrying");
-    diagLog("reading-stats book=" + fouladBookId + " got 404, registering and retrying");
-    registerDevice(username, password);
-    if (postReadingStatsOnce(username, password, fouladBookId, progressPercent, lastPosition, secondsRead)) return;
-  }
   LOG_ERR(TAG, "Reading-stats report failed (status=%d)", HttpDownloader::getLastFailure().detail);
   diagLog("reading-stats book=" + fouladBookId +
           " gave up, status=" + std::to_string(HttpDownloader::getLastFailure().detail));
@@ -695,17 +281,8 @@ void uploadDebugLog(const std::string& username, const std::string& password) {
   const std::vector<std::pair<std::string, std::string>> fields = {{"serial_number", getSerialNumber()},
                                                                    {"firmware_version", CROSSPOINT_VERSION}};
   std::string response;
-  bool ok = HttpDownloader::postFilesMultipart(deviceLogEndpoint(), files, fields, response, 20000, username, password);
-
-  if (!ok) {
-    const auto failure = HttpDownloader::getLastFailure();
-    if (failure.stage == HttpDownloader::FailStage::STATUS && failure.detail == 404) {
-      // Unknown device server-side -- register once, then retry exactly once,
-      // same convention as reportReadingStats().
-      registerDevice(username, password);
-      ok = HttpDownloader::postFilesMultipart(deviceLogEndpoint(), files, fields, response, 20000, username, password);
-    }
-  }
+  const bool ok =
+      HttpDownloader::postFilesMultipart(deviceLogEndpoint(), files, fields, response, 20000, username, password);
 
   // Neither outcome is diagLog()'d, because diagLog() writes to DebugLog::PATH --
   // the very file this function just uploaded (see diagLog's definition above).
@@ -792,17 +369,8 @@ bool uploadCrashReport(const std::string& username, const std::string& password)
       {"type", "crash"},
       {"firmware_version", crashedVersion.empty() ? CROSSPOINT_VERSION : crashedVersion}};
   std::string response;
-  bool ok = HttpDownloader::postFilesMultipart(deviceLogEndpoint(), files, fields, response, 20000, username, password);
-
-  if (!ok) {
-    const auto failure = HttpDownloader::getLastFailure();
-    if (failure.stage == HttpDownloader::FailStage::STATUS && failure.detail == 404) {
-      // Unknown device server-side -- register once, then retry exactly once,
-      // same convention as reportReadingStats()/uploadDebugLog().
-      registerDevice(username, password);
-      ok = HttpDownloader::postFilesMultipart(deviceLogEndpoint(), files, fields, response, 20000, username, password);
-    }
-  }
+  const bool ok =
+      HttpDownloader::postFilesMultipart(deviceLogEndpoint(), files, fields, response, 20000, username, password);
 
   if (!ok) {
     LOG_ERR(TAG, "Crash report upload failed (status=%d)", HttpDownloader::getLastFailure().detail);
@@ -849,23 +417,12 @@ void reportDeviceStats(const std::string& username, const std::string& password)
             " need=" + std::to_string(estimatedReadingBytes + READING_SNAPSHOT_SAFETY_MARGIN_BYTES));
   }
 
-  bool ok = postDeviceStatsOnce(username, password, includeReading);
-  if (!ok) {
-    const auto failure = HttpDownloader::getLastFailure();
-    if (failure.stage == HttpDownloader::FailStage::STATUS && failure.detail == 404) {
-      // Unknown device server-side -- register once, then retry exactly once,
-      // same convention as every other upload here.
-      registerDevice(username, password);
-      ok = postDeviceStatsOnce(username, password, includeReading);
-    }
-  }
+  const bool ok = postDeviceStatsOnce(username, password, includeReading);
 
   // Only remember success -- a failed send (including one that skipped the
   // reading snapshot for heap reasons) should retry next connect, not be
   // treated as "already reported."
   if (ok && includeReading) lastReportedTotalReadingMs = totalMs;
 }
-
-const std::string& pendingFirmwareUpdate() { return latestFirmwareOffer; }
 
 }  // namespace FouladDeviceTracking

@@ -9,13 +9,7 @@
 #include "FouladTelemetryGate.h"
 #include "RecentBooksStore.h"
 
-namespace {
-// Owned here, not by the caller (see FouladOpdsHooks.h's pollDeviceTracking()
-// comment) -- persists for the program's lifetime rather than resetting each
-// time a new OpdsBookBrowserActivity is constructed.
-constexpr unsigned long DEVICE_TRACKING_RECHECK_MS = 30000;
-unsigned long lastDeviceTrackingCheckMs = 0;
-}  // namespace
+namespace {}  // namespace
 
 namespace FouladOpdsHooks {
 
@@ -41,7 +35,7 @@ void reportDeviceTrackingOnConnect(const OpdsServer& server) {
   // Ordered by how irreplaceable the data is. A crash report exists once and explains a
   // failure nobody else can reproduce; a stats snapshot is regenerated every session.
   static uint8_t nextTask = 0;
-  constexpr uint8_t TASK_COUNT = 5;
+  constexpr uint8_t TASK_COUNT = 4;
   const uint8_t task = nextTask;
   nextTask = static_cast<uint8_t>((nextTask + 1) % TASK_COUNT);
   switch (task) {
@@ -49,32 +43,15 @@ void reportDeviceTrackingOnConnect(const OpdsServer& server) {
       FouladDeviceTracking::flushPendingCrashReport(server.username, server.password);
       break;
     case 1:
-      FouladDeviceTracking::registerDevice(server.username, server.password);
-      break;
-    case 2:
       FouladDeviceTracking::flushPendingReadingStats(server.username, server.password);
       break;
-    case 3:
+    case 2:
       FouladDeviceTracking::uploadDebugLog(server.username, server.password);
       break;
     default:
       FouladDeviceTracking::reportDeviceStats(server.username, server.password);
       break;
   }
-}
-
-void pollDeviceTracking(const OpdsServer& server, const bool isBrowsing) {
-  const unsigned long nowMs = millis();
-  const bool shouldPoll =
-      shouldPollDeviceTracking(isBrowsing, server.url == FOULAD_EBOOKS_URL, WiFi.status() == WL_CONNECTED, nowMs,
-                               lastDeviceTrackingCheckMs, DEVICE_TRACKING_RECHECK_MS);
-  if (!shouldPoll) return;
-  lastDeviceTrackingCheckMs = nowMs;
-  // The 30s cadence above is only the earliest this may re-run. The gate holds the actual
-  // schedule, widening it after each failure, so a server that cannot answer is retried
-  // less and less often instead of every 30s forever.
-  if (!FouladTelemetryGate::allow(nowMs)) return;
-  FouladDeviceTracking::registerDevice(server.username, server.password);
 }
 
 void removeExistingNewsDownload(const std::string& filename) {

@@ -101,14 +101,8 @@ bool FouladReadingPosition::sync(const std::string& username, const std::string&
   serializeJson(doc, body);
 
   std::string response;
-  bool ok = HttpDownloader::postJson(FOULAD_EBOOKS_READING_POSITION_URL, body, username, password, response) ==
-            HttpDownloader::OK;
-  if (!ok && isUnknownDeviceFailure(response)) {
-    FouladDeviceTracking::registerDevice(username, password);
-    response.clear();
-    ok = HttpDownloader::postJson(FOULAD_EBOOKS_READING_POSITION_URL, body, username, password, response) ==
-         HttpDownloader::OK;
-  }
+  const bool ok = HttpDownloader::postJson(FOULAD_EBOOKS_READING_POSITION_URL, body, username, password, response) ==
+                  HttpDownloader::OK;
 
   if (!ok) {
     LOG_ERR(TAG, "position sync failed (status=%d)", HttpDownloader::getLastFailure().detail);
@@ -137,12 +131,7 @@ bool FouladReadingPosition::fetch(const std::string& username, const std::string
 
   const std::string url = std::string(FOULAD_EBOOKS_READING_POSITION_URL) + "?book_id=" + fouladBookId;
   std::string response;
-  bool ok = HttpDownloader::fetchUrl(url, response, username, password);
-  if (!ok && isUnknownDeviceFailure(response)) {
-    FouladDeviceTracking::registerDevice(username, password);
-    response.clear();
-    ok = HttpDownloader::fetchUrl(url, response, username, password);
-  }
+  const bool ok = HttpDownloader::fetchUrl(url, response, username, password);
 
   if (!ok) {
     LOG_ERR(TAG, "position fetch failed (status=%d)", HttpDownloader::getLastFailure().detail);
