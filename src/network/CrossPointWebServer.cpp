@@ -635,75 +635,77 @@ void CrossPointWebServer::handleFileListData() const {
 
   server->setContentLength(CONTENT_LENGTH_UNKNOWN);
   server->send(200, "application/json", "");
-  server->sendContent("[");
-  char output[512];
-  constexpr size_t outputSize = sizeof(output);
-  bool seenFirst = false;
-  JsonDocument doc;
+  server->sendContent("[", 1);
 
-  size_t entries = 0;
-  // Wall-clock budget for the whole listing.
+  // Deliberately allocation-free per entry.
   //
-  // A stalled-but-still-connected peer is the case connected() cannot see: the TCP
-  // window fills, the client stops reading, and sendContent() blocks. NetworkClient
-  // retries a blocked write WIFI_CLIENT_MAX_WRITE_RETRY (10) times with a
-  // WIFI_CLIENT_SELECT_TIMEOUT_US (1 s) select each, so ONE send can take 10
-  // seconds, and a directory of thirty files with two sends apiece is ten minutes
-  // of blocked main loop. Neither constant is configurable. A normal root listing
-  // on this device completes in well under a second, so this budget only ever fires
-  // on a peer that has stopped reading.
+  // This loop runs with the least heap the device ever has: WiFi takes ~64KB and
+  // the web server another ~27KB, so serving a listing starts from ~21KB free and
+  // one request's own parsing spends half of that. Measured on an X3: free heap was
+  // 11,680 bytes at the first entry, and the device died there. A JsonDocument per
+  // entry plus two sendContent(const char*) calls -- each of which constructs a
+  // temporary Arduino String -- put three heap allocations in the hot path for
+  // every file. The JSON here is four fixed keys; building it by hand costs a
+  // snprintf and nothing else.
+  char output[512];
+  size_t entries = 0;
+  bool seenFirst = false;
   const unsigned long listingStart = millis();
+  // A stalled-but-connected peer blocks sendContent() for up to 10 s per call
+  // (WIFI_CLIENT_MAX_WRITE_RETRY x WIFI_CLIENT_SELECT_TIMEOUT_US, neither
+  // configurable), so bound the whole listing rather than trusting each write.
   constexpr unsigned long LISTING_BUDGET_MS = 8000;
-  scanFiles(currentPath.c_str(),
-            [this, &output, &doc, &entries, listingStart, seenFirst](const FileInfo& info) mutable {
-              // Stop the moment the client is gone. sendContent() writes to a socket with
-              // no caller-visible timeout, so streaming into a peer that has stopped reading
-              // -- or half-closed, which Safari does with speculative connections -- blocks
-              // inside this loop with the main loop stuck behind it. The device then looks
-              // frozen and only a power cycle clears it. Observed on the reference X3: the
-              // scan started and "Served file listing page" never printed.
-              if (!server->client().connected()) {
-                LOG_DBG("WEB", "Client gone after %u entries; abandoning listing", (unsigned)entries);
-                return false;
-              }
-              if (millis() - listingStart > LISTING_BUDGET_MS) {
-                // Still connected, but not draining what we send. Abandoning truncates the
-                // JSON, which the client will reject -- far better than holding the whole
-                // device until someone power-cycles it.
-                LOG_ERR("WEB", "Listing stalled after %u entries (%lu ms); client not reading, abandoning",
-                        (unsigned)entries, millis() - listingStart);
-                return false;
-              }
-              // Throttled progress, so a stall inside the scan is locatable next time rather
-              // than presenting as silence.
-              if ((entries & 0x0F) == 0) {
-                LOG_DBG("WEB", "listing entry %u, free heap %u", (unsigned)entries, (unsigned)ESP.getFreeHeap());
-              }
-              entries++;
-              doc.clear();
-              doc["name"] = info.name;
-              doc["size"] = info.size;
-              doc["isDirectory"] = info.isDirectory;
-              doc["isEpub"] = info.isEpub;
 
-              const size_t written = serializeJson(doc, output, outputSize);
-              if (written >= outputSize) {
-                // JSON output truncated; skip this entry to avoid sending malformed JSON
-                LOG_DBG("WEB", "Skipping file entry with oversized JSON for name: %s", info.name.c_str());
-                return true;
-              }
+  scanFiles(currentPath.c_str(), [this, &output, &entries, &seenFirst, listingStart](const FileInfo& info) {
+    if (!server->client().connected()) {
+      LOG_DBG("WEB", "Client gone after %u entries; abandoning listing", (unsigned)entries);
+      return false;
+    }
+    if (millis() - listingStart > LISTING_BUDGET_MS) {
+      LOG_ERR("WEB", "Listing stalled after %u entries (%lu ms); client not reading, abandoning", (unsigned)entries,
+              millis() - listingStart);
+      return false;
+    }
+    if ((entries & 0x0F) == 0) {
+      LOG_DBG("WEB", "listing entry %u, free heap %u", (unsigned)entries, (unsigned)ESP.getFreeHeap());
+    }
 
-              if (seenFirst) {
-                server->sendContent(",");
-              } else {
-                seenFirst = true;
-              }
-              server->sendContent(output);
-              return true;
-            });
-  server->sendContent("]");
-  // End of streamed response, empty chunk to signal client
-  server->sendContent("");
+    // Escape into the same buffer the record is built in. Only '"', '\\' and the
+    // control range need escaping; UTF-8 above 0x7F is valid inside a JSON string
+    // and passes through byte for byte, which matters for the Arabic filenames
+    // this device is full of.
+    char escaped[300];
+    size_t e = 0;
+    for (const char* c = info.name.c_str(); *c && e + 7 < sizeof(escaped); ++c) {
+      const unsigned char ch = static_cast<unsigned char>(*c);
+      if (ch == '"' || ch == '\\') {
+        escaped[e++] = '\\';
+        escaped[e++] = static_cast<char>(ch);
+      } else if (ch < 0x20) {
+        e += snprintf(escaped + e, sizeof(escaped) - e, "\\u%04x", ch);
+      } else {
+        escaped[e++] = static_cast<char>(ch);
+      }
+    }
+    escaped[e] = '\0';
+
+    const int written =
+        snprintf(output, sizeof(output), "%s{\"name\":\"%s\",\"size\":%u,\"isDirectory\":%s,\"isEpub\":%s}",
+                 seenFirst ? "," : "", escaped, (unsigned)info.size, info.isDirectory ? "true" : "false",
+                 info.isEpub ? "true" : "false");
+    if (written <= 0 || static_cast<size_t>(written) >= sizeof(output)) {
+      LOG_DBG("WEB", "Skipping entry with oversized JSON");
+      return true;
+    }
+    seenFirst = true;
+    entries++;
+    // The (const char*, size_t) overload: the String one would allocate per entry.
+    server->sendContent(output, static_cast<size_t>(written));
+    return true;
+  });
+
+  server->sendContent("]", 1);
+  server->sendContent("", 0);  // terminating empty chunk
   LOG_DBG("WEB", "Served file listing page for path: %s (%u entries)", currentPath.c_str(), (unsigned)entries);
 }
 
