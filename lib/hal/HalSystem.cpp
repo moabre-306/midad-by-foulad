@@ -44,6 +44,49 @@ void IRAM_ATTR __wrap_panic_abort(const char* message) {
   __real_panic_abort(message);
 }
 
+// Reason text for a CPU exception, which never reaches __wrap_panic_abort().
+//
+// panic_abort() is only called for abort()/assert()-style panics, so a fault --
+// a null dereference, a misaligned access -- left panicMessage empty and the
+// crash report read "(No reason was recorded)". That happened on a real X3 load
+// fault and made the report worthless while the serial log said exactly what
+// went wrong. Everything here is DRAM_ATTR and hand-rolled: this runs in panic
+// context, where flash may be inaccessible and snprintf is not safe to call.
+static DRAM_ATTR const char CAUSE_INSN_MISALIGN[] = "Instruction address misaligned";
+static DRAM_ATTR const char CAUSE_INSN_FAULT[] = "Instruction access fault";
+static DRAM_ATTR const char CAUSE_ILLEGAL[] = "Illegal instruction";
+static DRAM_ATTR const char CAUSE_BREAKPOINT[] = "Breakpoint";
+static DRAM_ATTR const char CAUSE_LOAD_MISALIGN[] = "Load address misaligned";
+static DRAM_ATTR const char CAUSE_LOAD_FAULT[] = "Load access fault";
+static DRAM_ATTR const char CAUSE_STORE_MISALIGN[] = "Store address misaligned";
+static DRAM_ATTR const char CAUSE_STORE_FAULT[] = "Store access fault";
+static DRAM_ATTR const char CAUSE_OTHER[] = "CPU exception";
+static DRAM_ATTR const char HEX_DIGITS[] = "0123456789abcdef";
+static DRAM_ATTR const char TXT_MCAUSE[] = " mcause=";
+static DRAM_ATTR const char TXT_MEPC[] = " mepc=0x";
+static DRAM_ATTR const char TXT_MTVAL[] = " mtval=0x";
+
+// Bounded append into panicMessage; returns the new length.
+static int IRAM_ATTR panicAppend(int at, const char* text) {
+  const int cap = (int)sizeof(panicMessage) - 1;
+  while (at < cap && *text) panicMessage[at++] = *text++;
+  panicMessage[at] = '\0';
+  return at;
+}
+
+static int IRAM_ATTR panicAppendHex(int at, uint32_t value) {
+  const int cap = (int)sizeof(panicMessage) - 1;
+  bool started = false;
+  for (int shift = 28; shift >= 0; shift -= 4) {
+    const uint32_t nibble = (value >> shift) & 0xF;
+    if (!started && nibble == 0 && shift != 0) continue;
+    started = true;
+    if (at < cap) panicMessage[at++] = HEX_DIGITS[nibble];
+  }
+  panicMessage[at] = '\0';
+  return at;
+}
+
 void IRAM_ATTR __wrap_panic_print_backtrace(const void* frame, int core) {
   if (!frame) {
     __real_panic_print_backtrace(frame, core);
@@ -79,6 +122,49 @@ void IRAM_ATTR __wrap_panic_print_backtrace(const void* frame, int core) {
       break;
     }
   }
+  // Only when panic_abort() did not run -- an abort/assert message is always
+  // more specific than a register decode, so never overwrite one.
+  if (panicMessage[0] == '\0') {
+    const RvExcFrame* f = (const RvExcFrame*)frame;
+    const uint32_t cause = (uint32_t)f->mcause;
+    const char* name = CAUSE_OTHER;
+    switch (cause) {
+      case 0:
+        name = CAUSE_INSN_MISALIGN;
+        break;
+      case 1:
+        name = CAUSE_INSN_FAULT;
+        break;
+      case 2:
+        name = CAUSE_ILLEGAL;
+        break;
+      case 3:
+        name = CAUSE_BREAKPOINT;
+        break;
+      case 4:
+        name = CAUSE_LOAD_MISALIGN;
+        break;
+      case 5:
+        name = CAUSE_LOAD_FAULT;
+        break;
+      case 6:
+        name = CAUSE_STORE_MISALIGN;
+        break;
+      case 7:
+        name = CAUSE_STORE_FAULT;
+        break;
+      default:
+        break;
+    }
+    int at = panicAppend(0, name);
+    at = panicAppend(at, TXT_MCAUSE);
+    at = panicAppendHex(at, cause);
+    at = panicAppend(at, TXT_MEPC);
+    at = panicAppendHex(at, (uint32_t)f->mepc);
+    at = panicAppend(at, TXT_MTVAL);
+    panicAppendHex(at, (uint32_t)f->mtval);
+  }
+
   panicCaptureMarker = PANIC_CAPTURE_MAGIC;
 
   __real_panic_print_backtrace(frame, core);
