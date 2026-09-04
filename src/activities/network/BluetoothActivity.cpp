@@ -95,6 +95,24 @@ void BluetoothActivity::onExit() {
   // does not erase them), so begin() reconnects to the last network.
   if (poweredWifiDown_) {
     poweredWifiDown_ = false;
+
+    // BLE must be torn down SYNCHRONOUSLY first. setUserRequested(false) above
+    // only takes effect when main.cpp's bleAllowedNow gate re-evaluates on its
+    // NEXT loop iteration, so without this the WiFi calls below run with NimBLE
+    // still fully resident (~57KB). On an X3 that left the driver unable to get
+    // its buffers and it dereferenced the null it got back:
+    //
+    //   E wifi: Expected to init 4 rx buffer, actual is 1
+    //   Guru Meditation Error: Core 0 panic'ed (Load access fault)
+    //   MCAUSE 0x5  MTVAL 0x0  A0 0x0   -- free heap 25,488, largest block 18,420
+    //
+    // BleWifiScanCache and BleWifiAutoConnectCache already do exactly this, for
+    // exactly this reason; this path was added later and missed it. end() is a
+    // full synchronous NimBLE teardown and a no-op when already off.
+    if (BlePeripheral.isActive()) {
+      BlePeripheral.end();
+    }
+
     WiFi.mode(WIFI_STA);
     WiFi.begin();
     LOG_INF("BLE", "WiFi restored on leaving the Bluetooth screen");
