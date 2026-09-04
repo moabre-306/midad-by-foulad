@@ -209,7 +209,8 @@ class HttpDownloader {
    * whose operator this firmware knows.
    */
   static DownloadError postJsonWolf(const std::string& url, const std::string& jsonBody, const char* caAnchorsPem,
-                                    std::string& outResponse, int timeoutMs = 15000);
+                                    std::string& outResponse, int timeoutMs = 15000, const std::string& username = {},
+                                    const std::string& password = {});
 
   /**
    * HTTP DELETE with optional Basic Auth, buffering any (expected-small) response

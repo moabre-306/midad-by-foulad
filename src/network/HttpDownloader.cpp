@@ -444,7 +444,8 @@ bool wolfReadChunked(VerifiedTlsSession& tls, std::string& out, uint8_t* buf, co
 }
 
 HttpDownloader::DownloadError runPostJsonWolf(const std::string& url, const std::string& jsonBody,
-                                              const char* caAnchorsPem, std::string& outResponse, const int timeoutMs) {
+                                              const char* caAnchorsPem, std::string& outResponse, const int timeoutMs,
+                                              const std::string& username, const std::string& password) {
   setLastFailure(HttpDownloader::FailStage::NONE, 0);
   outResponse.clear();
   WifiPowerSaveGuard psGuard;
@@ -498,6 +499,10 @@ HttpDownloader::DownloadError runPostJsonWolf(const std::string& url, const std:
   if (isFouladEbooksUrl(url)) {
     const std::string serial = FouladDeviceTracking::getSerialNumber();
     if (!serial.empty()) request += "X-Device-Serial: " + serial + "\r\n";
+  }
+  if (!username.empty() && !password.empty()) {
+    const std::string credentials = username + ":" + password;
+    request += "Authorization: Basic " + std::string(base64::encode(credentials.c_str()).c_str()) + "\r\n";
   }
   request += "Content-Length: " + std::to_string(jsonBody.size()) + "\r\n";
   request += "Connection: close\r\n\r\n";
@@ -1948,16 +1953,19 @@ HttpDownloader::DownloadError HttpDownloader::postJson(const std::string& url, c
 
 HttpDownloader::DownloadError HttpDownloader::postJsonWolf(const std::string& url, const std::string& jsonBody,
                                                            const char* caAnchorsPem, std::string& outResponse,
-                                                           int timeoutMs) {
+                                                           int timeoutMs, const std::string& username,
+                                                           const std::string& password) {
 #if defined(FREEINK_NET_WOLFSSL)
   LOG_DBG("HTTP", "Posting JSON (wolfSSL, pinned anchors): %s", url.c_str());
-  return runPostJsonWolf(url, jsonBody, caAnchorsPem, outResponse, timeoutMs);
+  return runPostJsonWolf(url, jsonBody, caAnchorsPem, outResponse, timeoutMs, username, password);
 #else
   // Fail closed. Falling back to the bundle path would silently answer a
   // request for these anchors with a different trust decision.
   (void)jsonBody;
   (void)caAnchorsPem;
   (void)timeoutMs;
+  (void)username;
+  (void)password;
   outResponse.clear();
   LOG_ERR("HTTP", "wolfSSL transport not built in; refusing pinned POST: %s", url.c_str());
   return HTTP_ERROR;

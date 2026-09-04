@@ -4,6 +4,7 @@
 #include <WiFi.h>
 
 #include "FouladEbooksConfig.h"
+#include "network/CoreCaCerts.h"
 #include "network/HttpDownloader.h"
 
 FouladDeviceLogout::Result FouladDeviceLogout::removeThisDevice(const std::string& username,
@@ -17,9 +18,21 @@ FouladDeviceLogout::Result FouladDeviceLogout::removeThisDevice(const std::strin
     return Result::Failed;
   }
 
+  // wolfSSL against the pinned GTS Root R4 anchor, exactly as device-login
+  // start/poll do -- NOT the esp_crt_bundle path.
+  //
+  // This endpoint is on the same host as pairing, whose chain is pure ECDSA
+  // (leaf <- WE1 <- GTS Root R4). Going through the bundle made mbedTLS verify
+  // against a bundled RSA root instead, and the RSA modular exponentiation could
+  // not allocate: observed on the X3 as
+  //   esp-x509-crt-bundle: PK verify failed with error 0x4290
+  // which decodes as RSA_PUBLIC_FAILED + MPI_ALLOC_FAILED, with free heap driven
+  // to 128 bytes mid-handshake. It reads like a trust failure and is not one --
+  // "Certificate matched" means the anchor WAS found. Rebooting into a clean heap
+  // first did not help, because the cost is inside the verification itself.
   std::string response;
-  if (HttpDownloader::postJson(FOULAD_EBOOKS_DEVICE_SIGNOUT_URL, "{}", username, password, response) ==
-      HttpDownloader::OK) {
+  if (HttpDownloader::postJsonWolf(FOULAD_EBOOKS_DEVICE_SIGNOUT_URL, "{}", core_ca::kMidadCoreCaGtsRootR4, response,
+                                   15000, username, password) == HttpDownloader::OK) {
     LOG_INF("LOGOUT", "this device's token revoked via /device-login/self-revoke");
     return Result::Removed;
   }

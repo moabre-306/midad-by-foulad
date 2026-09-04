@@ -642,44 +642,65 @@ void CrossPointWebServer::handleFileListData() const {
   JsonDocument doc;
 
   size_t entries = 0;
-  scanFiles(currentPath.c_str(), [this, &output, &doc, &entries, seenFirst](const FileInfo& info) mutable {
-    // Stop the moment the client is gone. sendContent() writes to a socket with
-    // no caller-visible timeout, so streaming into a peer that has stopped reading
-    // -- or half-closed, which Safari does with speculative connections -- blocks
-    // inside this loop with the main loop stuck behind it. The device then looks
-    // frozen and only a power cycle clears it. Observed on the reference X3: the
-    // scan started and "Served file listing page" never printed.
-    if (!server->client().connected()) {
-      LOG_DBG("WEB", "Client gone after %u entries; abandoning listing", (unsigned)entries);
-      return false;
-    }
-    // Throttled progress, so a stall inside the scan is locatable next time rather
-    // than presenting as silence.
-    if ((entries & 0x0F) == 0) {
-      LOG_DBG("WEB", "listing entry %u, free heap %u", (unsigned)entries, (unsigned)ESP.getFreeHeap());
-    }
-    entries++;
-    doc.clear();
-    doc["name"] = info.name;
-    doc["size"] = info.size;
-    doc["isDirectory"] = info.isDirectory;
-    doc["isEpub"] = info.isEpub;
+  // Wall-clock budget for the whole listing.
+  //
+  // A stalled-but-still-connected peer is the case connected() cannot see: the TCP
+  // window fills, the client stops reading, and sendContent() blocks. NetworkClient
+  // retries a blocked write WIFI_CLIENT_MAX_WRITE_RETRY (10) times with a
+  // WIFI_CLIENT_SELECT_TIMEOUT_US (1 s) select each, so ONE send can take 10
+  // seconds, and a directory of thirty files with two sends apiece is ten minutes
+  // of blocked main loop. Neither constant is configurable. A normal root listing
+  // on this device completes in well under a second, so this budget only ever fires
+  // on a peer that has stopped reading.
+  const unsigned long listingStart = millis();
+  constexpr unsigned long LISTING_BUDGET_MS = 8000;
+  scanFiles(currentPath.c_str(),
+            [this, &output, &doc, &entries, listingStart, seenFirst](const FileInfo& info) mutable {
+              // Stop the moment the client is gone. sendContent() writes to a socket with
+              // no caller-visible timeout, so streaming into a peer that has stopped reading
+              // -- or half-closed, which Safari does with speculative connections -- blocks
+              // inside this loop with the main loop stuck behind it. The device then looks
+              // frozen and only a power cycle clears it. Observed on the reference X3: the
+              // scan started and "Served file listing page" never printed.
+              if (!server->client().connected()) {
+                LOG_DBG("WEB", "Client gone after %u entries; abandoning listing", (unsigned)entries);
+                return false;
+              }
+              if (millis() - listingStart > LISTING_BUDGET_MS) {
+                // Still connected, but not draining what we send. Abandoning truncates the
+                // JSON, which the client will reject -- far better than holding the whole
+                // device until someone power-cycles it.
+                LOG_ERR("WEB", "Listing stalled after %u entries (%lu ms); client not reading, abandoning",
+                        (unsigned)entries, millis() - listingStart);
+                return false;
+              }
+              // Throttled progress, so a stall inside the scan is locatable next time rather
+              // than presenting as silence.
+              if ((entries & 0x0F) == 0) {
+                LOG_DBG("WEB", "listing entry %u, free heap %u", (unsigned)entries, (unsigned)ESP.getFreeHeap());
+              }
+              entries++;
+              doc.clear();
+              doc["name"] = info.name;
+              doc["size"] = info.size;
+              doc["isDirectory"] = info.isDirectory;
+              doc["isEpub"] = info.isEpub;
 
-    const size_t written = serializeJson(doc, output, outputSize);
-    if (written >= outputSize) {
-      // JSON output truncated; skip this entry to avoid sending malformed JSON
-      LOG_DBG("WEB", "Skipping file entry with oversized JSON for name: %s", info.name.c_str());
-      return true;
-    }
+              const size_t written = serializeJson(doc, output, outputSize);
+              if (written >= outputSize) {
+                // JSON output truncated; skip this entry to avoid sending malformed JSON
+                LOG_DBG("WEB", "Skipping file entry with oversized JSON for name: %s", info.name.c_str());
+                return true;
+              }
 
-    if (seenFirst) {
-      server->sendContent(",");
-    } else {
-      seenFirst = true;
-    }
-    server->sendContent(output);
-    return true;
-  });
+              if (seenFirst) {
+                server->sendContent(",");
+              } else {
+                seenFirst = true;
+              }
+              server->sendContent(output);
+              return true;
+            });
   server->sendContent("]");
   // End of streamed response, empty chunk to signal client
   server->sendContent("");
