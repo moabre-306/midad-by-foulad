@@ -167,6 +167,28 @@ void BluetoothActivity::loop() {
   }
 
 #ifndef SIMULATOR
+  // WiFi -> BLE, the other half of the handover. After a phone-initiated connect
+  // the radio belongs to WiFi and BLE is off deliberately, so there was no way
+  // back without leaving and re-entering this screen -- and the phone's own
+  // message ("Hold Confirm on it, then try again") asks for exactly this.
+  //
+  // Powering WiFi down here rather than only setting the request is what makes it
+  // immediate: main.cpp's gate refuses BLE while WiFi is up, so a request alone
+  // would sit unsatisfied with nothing explaining why.
+  if (currentUiState() == UiState::HandedToWifi && mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+    if (WiFi.getMode() != WIFI_MODE_NULL) {
+      WiFi.disconnect(true);
+      WiFi.mode(WIFI_OFF);
+    }
+    poweredWifiDown_ = true;  // onExit() restores it, as on first entry
+    BlePeripheral.setUserRequested(true);
+    LOG_INF("BLE", "Bluetooth restarted by user; WiFi released");
+    requestUpdate();
+    return;
+  }
+#endif
+
+#ifndef SIMULATOR
   // The radio machines advance on the main loop independently of BLE's own state,
   // so nothing else would repaint this screen while a scan or connect runs.
   const int wifiKey = wifiStateKey();
@@ -217,6 +239,7 @@ void BluetoothActivity::render(RenderLock&&) {
 
   const char* statusText = tr(STR_BLUETOOTH_STARTING);
   const char* hintText = nullptr;
+  const char* secondHintText = nullptr;
   switch (state) {
     case UiState::Starting:
       statusText = tr(STR_BLUETOOTH_STARTING);
@@ -237,6 +260,7 @@ void BluetoothActivity::render(RenderLock&&) {
       // while File Transfer is open here. Say so, rather than leaving the user on
       // a screen that reports success while the app times out.
       hintText = tr(STR_BLUETOOTH_FILE_TRANSFER_HINT);
+      secondHintText = tr(STR_BLUETOOTH_RESTART_HINT);
       break;
   }
   renderer.drawCenteredText(UI_12_FONT_ID, nextY, statusText, true, EpdFontFamily::BOLD);
@@ -260,7 +284,12 @@ void BluetoothActivity::render(RenderLock&&) {
 #endif
 
   if (hintText) {
-    renderer.drawCenteredText(SMALL_FONT_ID, nextY, hintText, true);
+    const int maxWidth = pageWidth - 40;
+    nextY += renderer.drawCenteredTextWrapped(SMALL_FONT_ID, nextY, maxWidth, hintText, 2);
+  }
+  if (secondHintText) {
+    nextY += 6;
+    renderer.drawCenteredText(SMALL_FONT_ID, nextY, secondHintText, true);
   }
 
   // Back is the only way out now -- and the only way BLE ever stops -- so it's the
