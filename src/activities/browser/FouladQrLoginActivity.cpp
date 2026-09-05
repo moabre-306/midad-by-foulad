@@ -25,7 +25,23 @@ void FouladQrLoginActivity::onEnter() {
                          [this](const ActivityResult& result) { onWifiSelectionComplete(!result.isCancelled); });
 }
 
-void FouladQrLoginActivity::onExit() { Activity::onExit(); }
+// Cancelling leaves WiFi initialised, and the user feels it immediately: the
+// radio holds ~20KB, dropping the largest contiguous block below the 42,768
+// bytes Home needs for its cover snapshot, so Home re-renders every cover on
+// every paint -- measured at 1,478 ms per repaint against ~15 ms with the
+// snapshot. The success path already escapes this by silent-restarting into the
+// catalog; cancel had no equivalent and returned to a Home it had just made slow.
+//
+// Restart rather than WiFi.mode(WIFI_OFF): freeing the radio does not
+// de-fragment what its allocations left behind (upstream issue #3343). Only a
+// reboot restores the contiguous block.
+void FouladQrLoginActivity::onExit() {
+  Activity::onExit();
+  if (result.isCancelled && WiFi.getMode() != WIFI_MODE_NULL) {
+    LOG_DBG("QRLOGIN", "Cancelled with WiFi up; restarting to give Home a clean heap");
+    silentRestart();  // does not return
+  }
+}
 
 void FouladQrLoginActivity::onWifiSelectionComplete(const bool success) {
   if (!success) {

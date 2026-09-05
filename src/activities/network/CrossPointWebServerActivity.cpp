@@ -69,10 +69,19 @@ namespace {
 // Consumed by the next onEnter(). A plain flag rather than a constructor argument
 // because the activity is created by ActivityManager after a reboot, so there is
 // no caller left to pass anything to.
-bool gSkipModeSelectionOnce = false;
+// Must survive a reboot, not just a screen change. files.open sets this and then
+// silent-restarts into File Transfer (the restart is what gives the web server an
+// unfragmented heap), and a plain static is zeroed by that restart -- so the
+// phone-initiated flow still stopped to ask the user to pick a network, which is
+// the one thing it exists to avoid. RTC_NOINIT survives a warm boot; the magic
+// distinguishes a real request from whatever the RTC holds after a cold start.
+RTC_NOINIT_ATTR uint32_t gSkipModeSelectionMagic;
+constexpr uint32_t SKIP_MODE_SELECTION_MAGIC = 0xF11E0A01;
 }  // namespace
 
-void CrossPointWebServerActivity::requestJoinNetworkWithoutPrompt() { gSkipModeSelectionOnce = true; }
+void CrossPointWebServerActivity::requestJoinNetworkWithoutPrompt() {
+  gSkipModeSelectionMagic = SKIP_MODE_SELECTION_MAGIC;
+}
 
 void CrossPointWebServerActivity::onEnter() {
   Activity::onEnter();
@@ -99,8 +108,8 @@ void CrossPointWebServerActivity::onEnter() {
   requestUpdate();
 
   // Pre-selected by BLE files.open: go straight to joining the saved network.
-  if (gSkipModeSelectionOnce) {
-    gSkipModeSelectionOnce = false;
+  if (gSkipModeSelectionMagic == SKIP_MODE_SELECTION_MAGIC) {
+    gSkipModeSelectionMagic = 0;  // one entry only; a later manual open still asks
     LOG_INF("WEBACT", "Mode selection skipped (requested over BLE); joining saved network");
     onNetworkModeSelected(NetworkMode::JOIN_NETWORK);
     return;
