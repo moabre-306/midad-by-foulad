@@ -25,7 +25,8 @@ namespace {
 // Core returns one position object under different keys: "position" on a PUT
 // (what we just stored) and "resume" on a GET (its canonical answer across all
 // this account's devices).
-bool parseCorePosition(JsonVariantConst obj, const std::string& ourDeviceId, FouladReadingPosition::Position& out) {
+bool parseCorePosition(JsonVariantConst obj, const std::string& ourDeviceId, const bool serverSawConflict,
+                       FouladReadingPosition::Position& out) {
   if (obj.isNull()) {
     out.hasPosition = false;
     return true;  // a book nobody has opened yet is a valid answer, not a failure
@@ -46,7 +47,13 @@ bool parseCorePosition(JsonVariantConst obj, const std::string& ourDeviceId, Fou
   // this written by somebody else" needs no float logic, and Core does not send a
   // should_jump flag on this contract. Our own last position is never a jump.
   const std::string owner = obj["deviceId"].isNull() ? "" : obj["deviceId"].as<std::string>();
-  out.shouldJump = !owner.empty() && owner != ourDeviceId;
+  // A conflict means Core could not honestly order the top two devices (they read
+  // within 900 s of each other and disagree by >= 0.5%, or a clock was untrusted).
+  // Jumping silently on that is the one thing the contract forbids: it would move
+  // the reader to a position the server itself will not vouch for. Staying put is
+  // always safe -- the local position is real, just possibly not the newest.
+  out.shouldJump = !owner.empty() && owner != ourDeviceId && !serverSawConflict;
+  if (serverSawConflict) LOG_INF(TAG, "server reported a conflict; not jumping");
 
   out.spineIndex = obj["spineIndex"].isNull() ? -1 : obj["spineIndex"].as<int>();
   out.spineCount = obj["spineCount"].isNull() ? -1 : obj["spineCount"].as<int>();
@@ -103,8 +110,16 @@ bool FouladReadingPosition::sync(const std::string& username, const std::string&
   const auto err = HttpDownloader::putJsonWolf(positionUrl(fouladBookId), body, core_ca::kMidadCoreCaGtsRootR4,
                                                response, 15000, username, password);
   if (err != HttpDownloader::OK) {
-    LOG_ERR(TAG, "position PUT failed (err=%d, http=%d)", static_cast<int>(err),
-            HttpDownloader::getLastFailure().detail);
+    const int status = HttpDownloader::getLastFailure().detail;
+    if (status == 404) {
+      // Core resolves the Store id against THIS account's own acquisition. A book
+      // sideloaded, or downloaded before this account was on Core OPDS, has no
+      // acquisition row and never will -- so this is terminal, not a transient
+      // failure to retry. Same 404 as a foreign or trashed item, by design.
+      LOG_ERR(TAG, "book %s is not an acquisition of this account; position dropped", fouladBookId.c_str());
+      return false;
+    }
+    LOG_ERR(TAG, "position PUT failed (err=%d, http=%d)", static_cast<int>(err), status);
     return false;
   }
 
@@ -115,7 +130,7 @@ bool FouladReadingPosition::sync(const std::string& username, const std::string&
   }
   out.resolution = reply["outcome"].isNull() ? "" : reply["outcome"].as<std::string>();
   LOG_INF(TAG, "position sent: %.2f%% -> %s", static_cast<double>(progressPercent), out.resolution.c_str());
-  return parseCorePosition(reply["position"], deviceId, out);
+  return parseCorePosition(reply["position"], deviceId, /*serverSawConflict=*/false, out);
 }
 
 bool FouladReadingPosition::fetch(const std::string& username, const std::string& password,
@@ -148,5 +163,6 @@ bool FouladReadingPosition::fetch(const std::string& username, const std::string
     LOG_ERR(TAG, "Malformed position GET response");
     return false;
   }
-  return parseCorePosition(reply["resume"], FouladDeviceTracking::getSerialNumber(), out);
+  return parseCorePosition(reply["resume"], FouladDeviceTracking::getSerialNumber(),
+                           /*serverSawConflict=*/!reply["conflict"].isNull(), out);
 }
