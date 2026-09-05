@@ -60,6 +60,21 @@ bool FouladReadingPosition::sync(const std::string& username, const std::string&
                                  const int totalPages, const uint32_t readAtEpochSeconds,
                                  const uint32_t readAtAgeSeconds, Position& out) {
   if (username.empty() || password.empty() || fouladBookId.empty()) return false;
+  // Legacy /opds/reading-position cannot authenticate this device.
+  //
+  // Since the Core migration the credential we hold is a Core device token, and
+  // legacy resolves device credentials against its OWN device_tokens table
+  // (OpdsBasicAuth.php:75, sha256 lookup) -- a store that has never seen a Core
+  // token. Every call is a guaranteed 401, for GET and POST alike.
+  //
+  // Not merely useless: legacy counts each 401 with recordFailure(), and 10
+  // failures inside 60 s trips a 429 against username+IP. A reader posting its
+  // position on page turns reaches that in about ten pages, spending the
+  // account's rate limit on requests that can never succeed. Better to make no
+  // request at all until this moves to Core's B1
+  // (PUT /resume/v1/items/{ref}/position), which accepts a device token.
+  return false;
+
   // WiFi first, before anything reaches HttpDownloader. Every function in
   // FouladDeviceTracking opens with this check and mine did not, which is the whole
   // bug: the reader tears WiFi down before a book is even opened, so this ran on a
@@ -127,6 +142,21 @@ bool FouladReadingPosition::sync(const std::string& username, const std::string&
 bool FouladReadingPosition::fetch(const std::string& username, const std::string& password,
                                   const std::string& fouladBookId, Position& out) {
   if (username.empty() || password.empty() || fouladBookId.empty()) return false;
+  // Legacy /opds/reading-position cannot authenticate this device.
+  //
+  // Since the Core migration the credential we hold is a Core device token, and
+  // legacy resolves device credentials against its OWN device_tokens table
+  // (OpdsBasicAuth.php:75, sha256 lookup) -- a store that has never seen a Core
+  // token. Every call is a guaranteed 401, for GET and POST alike.
+  //
+  // Not merely useless: legacy counts each 401 with recordFailure(), and 10
+  // failures inside 60 s trips a 429 against username+IP. A reader posting its
+  // position on page turns reaches that in about ten pages, spending the
+  // account's rate limit on requests that can never succeed. Better to make no
+  // request at all until this moves to Core's B1
+  // (PUT /resume/v1/items/{ref}/position), which accepts a device token.
+  return false;
+
   if (!FouladDeviceTracking::wifiConnected()) return false;  // see sync()
 
   const std::string url = std::string(FOULAD_EBOOKS_READING_POSITION_URL) + "?book_id=" + fouladBookId;
