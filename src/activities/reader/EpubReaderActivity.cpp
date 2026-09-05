@@ -403,7 +403,7 @@ void EpubReaderActivity::onExit() {
         const uint32_t ageSeconds =
             pageTurnedThisSession ? static_cast<uint32_t>((millis() - pageShownAtMs) / 1000UL) : 0;
         FouladReadingPosition::Position remote;
-        FouladReadingPosition::sync(serverIt->username, serverIt->password, recentIt->fouladBookId,
+        FouladReadingPosition::sync(serverIt->username, serverIt->password, recentIt->fouladBookId, recentIt->path,
                                     static_cast<float>(progressPercent), section ? section->currentPage : -1,
                                     section ? section->estimatedTotalPages() : -1, readAt, ageSeconds, remote);
       }

@@ -150,7 +150,7 @@ void MidadSyncActivity::performSync() {
   }
 
   FouladReadingPosition::Position fetched;
-  const bool ok = FouladReadingPosition::sync(it->username, it->password, fouladBookId, progressPercent, page,
+  const bool ok = FouladReadingPosition::sync(it->username, it->password, fouladBookId, epubPath, progressPercent, page,
                                               totalPages, /*readAtEpochSeconds=*/0, readAtAgeSeconds, fetched);
 
   RenderLock lock(*this);

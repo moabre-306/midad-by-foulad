@@ -92,6 +92,13 @@ constexpr char FOULAD_EBOOKS_READING_POSITION_URL[] = "https://midad.one/opds/re
 // makes mbedTLS attempt an RSA modexp it cannot allocate (0x4290) -- the failure
 // that broke sign-out. Logs deliberately use the text/plain envelope rather than
 // multipart for the same reason: multipart only exists on the bundle path.
+// Core resume position (B1). PUT/GET /resume/v1/items/{ref}/position, where {ref}
+// is the Store book id the reader downloaded -- Core resolves it to the caller's
+// own library item. Accepts the device token, so it replaces legacy
+// /opds/reading-position, which resolves device credentials in a store Core's
+// tokens have never been written to.
+constexpr char FOULAD_CORE_RESUME_ITEM_URL[] = "https://api.midad.one/resume/v1/items/";
+
 constexpr char FOULAD_CORE_HEARTBEAT_URL[] = "https://api.midad.one/devices/v1/heartbeat";
 constexpr char FOULAD_CORE_LOGS_URL[] = "https://api.midad.one/devices/v1/logs";
 // Server-side cap; a larger body is rejected 413 before it is read.

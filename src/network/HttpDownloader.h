@@ -213,6 +213,16 @@ class HttpDownloader {
                                     const std::string& password = {}, const char* contentType = "application/json");
 
   /**
+   * PUT with the same verified, pinned-anchor wolfSSL path as postJsonWolf.
+   * Core's resume-position route is a PUT, and it carries a device credential --
+   * so it must not fall back to the broad system CA bundle the plain postJson
+   * path uses.
+   */
+  static DownloadError putJsonWolf(const std::string& url, const std::string& jsonBody, const char* caAnchorsPem,
+                                   std::string& outResponse, int timeoutMs = 15000, const std::string& username = {},
+                                   const std::string& password = {}, const char* contentType = "application/json");
+
+  /**
    * HTTP DELETE with optional Basic Auth, buffering any (expected-small) response
    * body into outResponse.
    *

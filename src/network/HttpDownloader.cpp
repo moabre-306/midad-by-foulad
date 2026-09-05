@@ -446,7 +446,7 @@ bool wolfReadChunked(VerifiedTlsSession& tls, std::string& out, uint8_t* buf, co
 HttpDownloader::DownloadError runPostJsonWolf(const std::string& url, const std::string& jsonBody,
                                               const char* caAnchorsPem, std::string& outResponse, const int timeoutMs,
                                               const std::string& username, const std::string& password,
-                                              const char* contentType) {
+                                              const char* contentType, const char* method) {
   setLastFailure(HttpDownloader::FailStage::NONE, 0);
   outResponse.clear();
   WifiPowerSaveGuard psGuard;
@@ -488,7 +488,7 @@ HttpDownloader::DownloadError runPostJsonWolf(const std::string& url, const std:
 
   std::string request;
   request.reserve(256 + jsonBody.size());
-  request += "POST " + parts.path + " HTTP/1.1\r\n";
+  request += std::string(method) + " " + parts.path + " HTTP/1.1\r\n";
   request += "Host: " + parts.host;
   if (parts.port != 443) request += ":" + std::to_string(parts.port);
   request += "\r\n";
@@ -1958,7 +1958,29 @@ HttpDownloader::DownloadError HttpDownloader::postJsonWolf(const std::string& ur
                                                            const std::string& password, const char* contentType) {
 #if defined(FREEINK_NET_WOLFSSL)
   LOG_DBG("HTTP", "Posting (wolfSSL, pinned anchors): %s", url.c_str());
-  return runPostJsonWolf(url, jsonBody, caAnchorsPem, outResponse, timeoutMs, username, password, contentType);
+  return runPostJsonWolf(url, jsonBody, caAnchorsPem, outResponse, timeoutMs, username, password, contentType, "POST");
+#else
+  // Fail closed. Falling back to the bundle path would silently answer a
+  // request for these anchors with a different trust decision.
+  (void)jsonBody;
+  (void)caAnchorsPem;
+  (void)timeoutMs;
+  (void)username;
+  (void)password;
+  (void)contentType;
+  outResponse.clear();
+  LOG_ERR("HTTP", "wolfSSL transport not built in; refusing pinned POST: %s", url.c_str());
+  return HTTP_ERROR;
+#endif
+}
+
+HttpDownloader::DownloadError HttpDownloader::putJsonWolf(const std::string& url, const std::string& jsonBody,
+                                                          const char* caAnchorsPem, std::string& outResponse,
+                                                          int timeoutMs, const std::string& username,
+                                                          const std::string& password, const char* contentType) {
+#if defined(FREEINK_NET_WOLFSSL)
+  LOG_DBG("HTTP", "PUT (wolfSSL, pinned anchors): %s", url.c_str());
+  return runPostJsonWolf(url, jsonBody, caAnchorsPem, outResponse, timeoutMs, username, password, contentType, "PUT");
 #else
   // Fail closed. Falling back to the bundle path would silently answer a
   // request for these anchors with a different trust decision.
