@@ -235,7 +235,8 @@ constexpr uint32_t SILENT_REBOOT_TARGET_NEWS = 9;
 constexpr uint32_t SILENT_REBOOT_TARGET_LOGOUT = 10;
 constexpr uint32_t SILENT_REBOOT_TARGET_PAIRING = 11;
 constexpr uint32_t SILENT_REBOOT_TARGET_BLUETOOTH = 12;
-constexpr uint32_t SILENT_REBOOT_TARGET_MAX = SILENT_REBOOT_TARGET_BLUETOOTH;
+constexpr uint32_t SILENT_REBOOT_TARGET_APPS = 13;
+constexpr uint32_t SILENT_REBOOT_TARGET_MAX = SILENT_REBOOT_TARGET_APPS;
 // Must always name the highest target above. The boot-time range check below uses it
 // to reject uninitialised RTC memory on a cold boot, and a target outside the range
 // is silently treated as 0 -- which is HOME. Adding a target without moving this
@@ -336,6 +337,16 @@ void silentRestartToFileTransfer() {
   silentRebootTarget = SILENT_REBOOT_TARGET_FILE_TRANSFER;
   silentRebootMagic = SILENT_REBOOT_MAGIC;
   LOG_DBG("MAIN", "Silent restart (target=file_transfer)");
+  GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
+  delay(50);
+  ESP.restart();
+}
+
+void silentRestartToApps() {
+  if (deepSleepInProgress) return;  // sleeping supersedes the heap-defrag reboot
+  silentRebootTarget = SILENT_REBOOT_TARGET_APPS;
+  silentRebootMagic = SILENT_REBOOT_MAGIC;
+  LOG_DBG("MAIN", "Silent restart (target=apps)");
   GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
   delay(50);
   ESP.restart();
@@ -939,6 +950,10 @@ void setup() {
     // allocations for the WiFi driver and TCP buffers, and a fragmented heap
     // makes page loads crawl. Settings reboots here before starting it.
     activityManager.goToFileTransfer();
+  } else if (resume == BootResume::Silent && snapshotTarget == SILENT_REBOOT_TARGET_APPS) {
+    // Return-to-caller: the Bluetooth screen reboots here rather than restoring
+    // WiFi in place, so the user lands back in Apps on a clean heap.
+    activityManager.goToApps();
   } else if (resume == BootResume::Silent && snapshotTarget == SILENT_REBOOT_TARGET_PAIRING) {
     // Phone asked the reader to sign in (BLE account.register). The pairing code
     // is generated and displayed here, on the panel -- it is never carried over

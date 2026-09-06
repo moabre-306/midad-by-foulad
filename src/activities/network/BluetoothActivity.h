@@ -23,8 +23,11 @@
 // unconditionally requests it again right after.
 class BluetoothActivity final : public Activity {
  public:
-  explicit BluetoothActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
-      : Activity("Bluetooth", renderer, mappedInput) {}
+  // returnToApps: where the exit reboot lands. This screen leaves via a silent
+  // restart rather than restoring WiFi in place (see onExit), so it has to be told
+  // which screen the user came from -- a reboot has no navigation stack to pop.
+  explicit BluetoothActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, bool returnToApps = false)
+      : Activity("Bluetooth", renderer, mappedInput), returnToApps_(returnToApps) {}
   void onEnter() override;
   void onExit() override;
   void loop() override;
@@ -35,6 +38,8 @@ class BluetoothActivity final : public Activity {
   bool preventAutoSleep() override { return true; }
 
  private:
+  const bool returnToApps_ = false;
+
   // BlePeripheralManager::State direct passthrough, minus Off (this screen always
   // requests BLE on entry, so Off only appears for the brief window before begin()
   // completes -- rendered as Starting, same as before the radio has advertised yet).

@@ -47,6 +47,10 @@ void silentRestartToLogout();
 // displayed by the reader, never carried over BLE.
 void silentRestartToPairing();
 
+// Apps menu, for the Bluetooth screen's return leg -- see silentRestartToBluetooth()
+// and BluetoothActivity::onExit().
+void silentRestartToApps();
+
 // Back to the Bluetooth screen once a WiFi service (file transfer / settings)
 // is closed from the phone, so the user can pick another service. BLE and WiFi
 // cannot be up together on the C3, so this is the return leg of the handover.

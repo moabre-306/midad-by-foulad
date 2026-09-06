@@ -173,7 +173,8 @@ bool AppsActivity::launch(const AppEntry& entry) {
       // clears the heap gate as measured on real hardware, since Apps itself has
       // nothing comparable to Home's retained cover buffer. Back correctly returns
       // to Apps, not Home.
-      startActivityForResult(std::make_unique<BluetoothActivity>(renderer, mappedInput), [](const ActivityResult&) {});
+      startActivityForResult(std::make_unique<BluetoothActivity>(renderer, mappedInput, /*returnToApps=*/true),
+                             [](const ActivityResult&) {});
       return true;
   }
   return false;

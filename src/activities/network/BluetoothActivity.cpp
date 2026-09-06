@@ -1,5 +1,7 @@
 #include "BluetoothActivity.h"
 
+#include "SilentRestart.h"
+
 #ifndef SIMULATOR
 // No simulator-side counterpart exists for this HAL component (see main.cpp's own
 // guarded include of the same header) -- every access below is guarded so this whole
@@ -133,34 +135,36 @@ void BluetoothActivity::onExit() {
   // next tick, same as it always has.
   BlePeripheral.setUserRequested(false);
 
-  // Put the radio back the way we found it. Without this, leaving this screen
-  // left WiFi off with no indication, and the next screen that wanted the
-  // network looked simply broken -- reported from the device as "wifi didn't
-  // connect" after using BLE. Saved credentials are intact (disconnect(true)
-  // does not erase them), so begin() reconnects to the last network.
+  // Leave via a restart rather than bringing WiFi back up in place.
+  //
+  // Restoring it here was right about the symptom and expensive about the cure:
+  // without it the next screen that wanted the network looked broken ("wifi didn't
+  // connect" after using BLE). But WiFi.begin() costs ~30KB and the heap never gets
+  // the contiguity back -- measured on the X3 leaving this screen, free 83,304
+  // before the restore and 53,480 after, which puts Home under the 42,768 bytes its
+  // cover snapshot needs and makes every repaint 1,478 ms instead of ~15. Reported
+  // from the device as "device very very slow".
+  //
+  // A restart answers both: the heap comes back pristine, and WiFi lands in its
+  // cold-boot state -- the state every network screen is known to work from.
   if (poweredWifiDown_) {
     poweredWifiDown_ = false;
 
-    // BLE must be torn down SYNCHRONOUSLY first. setUserRequested(false) above
-    // only takes effect when main.cpp's bleAllowedNow gate re-evaluates on its
-    // NEXT loop iteration, so without this the WiFi calls below run with NimBLE
-    // still fully resident (~57KB). On an X3 that left the driver unable to get
-    // its buffers and it dereferenced the null it got back:
-    //
-    //   E wifi: Expected to init 4 rx buffer, actual is 1
-    //   Guru Meditation Error: Core 0 panic'ed (Load access fault)
-    //   MCAUSE 0x5  MTVAL 0x0  A0 0x0   -- free heap 25,488, largest block 18,420
-    //
-    // BleWifiScanCache and BleWifiAutoConnectCache already do exactly this, for
-    // exactly this reason; this path was added later and missed it. end() is a
-    // full synchronous NimBLE teardown and a no-op when already off.
+    // BLE must be torn down SYNCHRONOUSLY first. setUserRequested(false) above only
+    // takes effect when main.cpp's bleAllowedNow gate re-evaluates on its NEXT loop
+    // iteration, which a restart never reaches -- leaving NimBLE's ~57KB resident
+    // across the reboot. end() is a full synchronous teardown, a no-op when off.
     if (BlePeripheral.isActive()) {
       BlePeripheral.end();
     }
 
-    WiFi.mode(WIFI_STA);
-    WiFi.begin();
-    LOG_INF("BLE", "WiFi restored on leaving the Bluetooth screen");
+    Activity::onExit();
+    LOG_INF("BLE", "Leaving Bluetooth; restarting for a clean heap");
+    if (returnToApps_) {
+      silentRestartToApps();  // does not return
+    } else {
+      silentRestart();  // does not return
+    }
   }
 #endif
   Activity::onExit();
