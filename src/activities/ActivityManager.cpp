@@ -7,6 +7,8 @@
 #include <HalPowerManager.h>
 #include <HeapTrace.h>
 #include <Memory.h>
+
+#include "SilentRestart.h"
 #ifndef SIMULATOR
 #include <BlePeripheralManager.h>
 #endif
@@ -338,8 +340,13 @@ void onLogoutFinished(const bool removed) {
       }
     }
   }
-  // Back where the user started the sign-out from.
-  activityManager.goToSettings();
+  // Back where the user started the sign-out from -- via a restart, because
+  // sign-out brings WiFi up and nothing after it needs the network. Navigating in
+  // place left the radio initialised for the rest of the session, and the ~30KB it
+  // holds puts Home under the 42,768 contiguous bytes its cover snapshot needs,
+  // which turns every Home repaint into a full cover re-render (1,478 ms against
+  // ~15). Same reason BluetoothActivity::onExit() restarts.
+  silentRestartToSettings();  // does not return
 }
 }  // namespace
 
