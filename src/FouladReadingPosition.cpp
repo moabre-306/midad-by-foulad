@@ -55,7 +55,13 @@ bool parseCorePosition(JsonVariantConst obj, const std::string& ourDeviceId, con
   out.shouldJump = !owner.empty() && owner != ourDeviceId && !serverSawConflict;
   if (serverSawConflict) LOG_INF(TAG, "server reported a conflict; not jumping");
 
-  out.spineIndex = obj["spineIndex"].isNull() ? -1 : obj["spineIndex"].as<int>();
+  // Core's spineIndex is 1-BASED (resume contract, "spineIndex: 4 // 1-BASED").
+  // Everything downstream here is 0-based: jumpToSpine() treats index 0 as valid
+  // and index == spineCount as out of range. Passing the wire value straight
+  // through would land every jump one document late, and refuse outright on the
+  // final one. Convert once, here, so only this line knows about the difference.
+  const int wireSpine = obj["spineIndex"].isNull() ? 0 : obj["spineIndex"].as<int>();
+  out.spineIndex = wireSpine >= 1 ? wireSpine - 1 : -1;
   out.spineCount = obj["spineCount"].isNull() ? -1 : obj["spineCount"].as<int>();
   return true;
 }
