@@ -134,6 +134,13 @@ struct ThemeMetrics {
   int textFieldNormalThickness;
   int textFieldCursorThickness;
   int textFieldLineEndOffset;
+
+  // Corner radii for the fui control surfaces upstream added: buttons/rows, a
+  // sheet's free-edge corners, and the capsule slider (255 = full stadium).
+  // 0 keeps Midad's existing square-cornered look; a theme may override.
+  int controlRadius;
+  int sheetRadius;
+  int capsuleRadius;
 };
 
 enum UIIcon {
@@ -151,7 +158,8 @@ enum UIIcon {
   Hotspot,
   Bookmark,
   Stats,
-  Apps
+  Apps,
+  Usb
 };
 
 enum class KeyboardKeyType { Normal, Shift, Mode, Space, Del, Ok, Disabled };
@@ -247,7 +255,10 @@ constexpr ThemeMetrics values = {.batteryWidth = 15,
                                  .textFieldHorizontalPadding = 6,
                                  .textFieldNormalThickness = 1,
                                  .textFieldCursorThickness = 3,
-                                 .textFieldLineEndOffset = 0};
+                                 .textFieldLineEndOffset = 0,
+                                 .controlRadius = 0,
+                                 .sheetRadius = 0,
+                                 .capsuleRadius = 0};
 }
 
 class BaseTheme {

@@ -1922,28 +1922,11 @@ void EpubReaderActivity::renderBook() {
       // in layout (HTML/CSS parsing, line-breaking, page-splitting). Reports
       // both the reading font and its resolved Arabic font (if different and
       // SD-backed) since a chapter's layout can touch both.
-      if (auto* fcmForBuildStats = renderer.getFontCacheManager()) {
-        const int readerFontId = SETTINGS.getReaderFontId();
-        const int arabicFontId = renderer.getArabicFontIdFor(readerFontId);
-        uint32_t prewarmMs = 0, readMs = 0, seeks = 0, glyphs = 0, bytes = 0;
-        fcmForBuildStats->getSdFontDiagStats(readerFontId, prewarmMs, readMs, seeks, glyphs, bytes);
-        if (seeks > 0 || bytes > 0) {
-          char part[96];
-          snprintf(part, sizeof(part), " font_sd_ms=%lu font_seeks=%lu font_glyphs=%lu font_bytes=%lu",
-                   (unsigned long)readMs, (unsigned long)seeks, (unsigned long)glyphs, (unsigned long)bytes);
-          strncat(buf, part, sizeof(buf) - strlen(buf) - 1);
-        }
-        if (arabicFontId != readerFontId) {
-          uint32_t aPrewarmMs = 0, aReadMs = 0, aSeeks = 0, aGlyphs = 0, aBytes = 0;
-          fcmForBuildStats->getSdFontDiagStats(arabicFontId, aPrewarmMs, aReadMs, aSeeks, aGlyphs, aBytes);
-          if (aSeeks > 0 || aBytes > 0) {
-            char part[96];
-            snprintf(part, sizeof(part), " arabic_sd_ms=%lu arabic_seeks=%lu arabic_glyphs=%lu arabic_bytes=%lu",
-                     (unsigned long)aReadMs, (unsigned long)aSeeks, (unsigned long)aGlyphs, (unsigned long)aBytes);
-            strncat(buf, part, sizeof(buf) - strlen(buf) - 1);
-          }
-        }
-      }
+      // SD-font read/seek telemetry for the OLD prewarm path removed with it:
+      // upstream's scan-based prewarm (adopted in the 1.6.22 sync) tracks a slot
+      // per distinct font, so the "only the first Arabic font is warmed" defect it
+      // was built to diagnose cannot recur. Re-add against the new mechanism if a
+      // slow-page-turn report ever needs it again.
       char titlePart[64];
       snprintf(titlePart, sizeof(titlePart), " \"%s\"", epub->getTitle().c_str());
       strncat(buf, titlePart, sizeof(buf) - strlen(buf) - 1);
@@ -2205,7 +2188,7 @@ constexpr unsigned long SLOW_PAGE_TURN_MS = 3000;
 // real multi-second turn is actually spending time in.
 void logSlowPageTurn(unsigned long t0, unsigned long tScanRender, unsigned long tPrewarm, unsigned long tBwRender,
                      unsigned long tDisplay, unsigned long tEnd, int spineIndex, const std::string& title,
-                     FontCacheManager* fcm, size_t preEndScanArabicBytes, int preEndScanArabicFontId) {
+                     FontCacheManager* fcm) {
   const unsigned long total = tEnd - t0;
   // A failed malloc() inside FontDecompressor::getBitmap() (real-device memory
   // pressure only -- never reproduced against the simulator's effectively-unlimited
@@ -2248,65 +2231,11 @@ void logSlowPageTurn(unsigned long t0, unsigned long tScanRender, unsigned long 
                (unsigned long)s.pageBufferBytes, (unsigned)s.uniqueGroupsAccessed, (unsigned long)s.bitmapAllocFailures,
                (unsigned long)s.firstFailedAllocBytes);
     }
-    const char* pathStr = "?";
-    switch (fcm->getLastArabicPrewarmPath()) {
-      case FontCacheManager::LastPrewarmPath::NotAttempted:
-        pathStr = "not_attempted";
-        break;
-      case FontCacheManager::LastPrewarmPath::NoFontFound:
-        pathStr = "no_font";
-        break;
-      case FontCacheManager::LastPrewarmPath::SdCardFont:
-        pathStr = "sd";
-        break;
-      case FontCacheManager::LastPrewarmPath::Compressed:
-        pathStr = "compressed";
-        break;
-    }
-    // entries: how many times drawArabicText() was called during THIS page's scan
-    // pass (counted before its own early return, so this can't be skipped by
-    // whatever's causing scan_bytes=0). font_missing: how many of those calls found
-    // the resolved Arabic font id absent from fontMap (the early-return path) --
-    // if entries>0 and font_missing==entries, that early return is exactly why
-    // nothing ever gets recorded. If entries==0, drawArabicText() isn't even being
-    // reached during scan, and the bug is further upstream (TextBlock/drawText).
-    // prewarm_fonts: how many DISTINCT Arabic fonts got their own prewarm call this
-    // page (a Quran surah-header page legitimately has 3: the reading font for ayah
-    // body text, plus the banner's calligraphy and label fonts) -- confirms every
-    // font recorded during the scan actually got prewarmed, not just one.
-    char pathPart[170];
-    snprintf(pathPart, sizeof(pathPart),
-             " scan_bytes=%lu scan_font=%d path=%s entries=%lu font_missing=%lu last_font=%d prewarm_fonts=%lu",
-             (unsigned long)fcm->getLastArabicScanTextBytes(), fcm->getLastArabicPrewarmFontId(), pathStr,
-             (unsigned long)fcm->getArabicScanEntries(), (unsigned long)fcm->getArabicScanFontMissing(),
-             fcm->getArabicScanLastResolvedFontId(), (unsigned long)fcm->getLastArabicPrewarmFontCount());
-    strncat(statsPart, pathPart, sizeof(statsPart) - strlen(statsPart) - 1);
-    // hits/misses/decomp/calls/prewarm_glyphs/etc. above are FontDecompressor's stats --
-    // meaningless on a path=sd turn, since that's the flash-font decompressor, not the
-    // SD card read that's actually on the critical path for a path=sd font. Append the
-    // SD font's own stats (SdCardFont::Stats, reset every page alongside everything else
-    // in PrewarmScope's ctor) so a slow SD-font turn shows sd_read_ms/seeks/glyphs/bytes
-    // instead of stale numbers from whatever flash font last ran.
-    if (pathStr[0] == 's') {  // "sd"
-      uint32_t sdPrewarmTotalMs = 0, sdReadTimeMs = 0, seekCount = 0, uniqueGlyphs = 0, bitmapBytes = 0;
-      fcm->getSdFontDiagStats(fcm->getLastArabicPrewarmFontId(), sdPrewarmTotalMs, sdReadTimeMs, seekCount,
-                              uniqueGlyphs, bitmapBytes);
-      char sdPart[128];
-      snprintf(sdPart, sizeof(sdPart), " sd_prewarm_ms=%lu sd_read_ms=%lu seeks=%lu sd_glyphs=%lu sd_bytes=%lu",
-               (unsigned long)sdPrewarmTotalMs, (unsigned long)sdReadTimeMs, (unsigned long)seekCount,
-               (unsigned long)uniqueGlyphs, (unsigned long)bitmapBytes);
-      strncat(statsPart, sdPart, sizeof(statsPart) - strlen(statsPart) - 1);
-    }
-    // Diagnostics only: pre_bytes/pre_font are the SAME accumulator scan_bytes/scan_font
-    // read above, but peeked immediately after the scan-pass render() call, before
-    // endScanAndPrewarm() runs. If pre_bytes>0 while scan_bytes=0, something between the
-    // peek and endScanAndPrewarm() clobbers scanArabicText_. If pre_bytes=0 too, the
-    // accumulator was already empty at the earliest possible point, despite entries>0 --
-    // meaning recordArabicText() itself isn't the one being called those `entries` times.
-    char prePart[64];
-    snprintf(prePart, sizeof(prePart), " pre_bytes=%lu pre_font=%d", (unsigned long)preEndScanArabicBytes,
-             preEndScanArabicFontId);
-    strncat(statsPart, prePart, sizeof(statsPart) - strlen(statsPart) - 1);
+    // Arabic prewarm telemetry removed with the mechanism it measured. The old
+    // path/entries/font_missing counters existed to diagnose a prewarm that saw only
+    // the first Arabic font on a page; upstream's scan-based prewarm (adopted in the
+    // 1.6.22 sync) assigns a slot per distinct font, so that failure mode is gone by
+    // construction. FontDecompressor's own stats above still describe the page.
   }
   char buf[640];
   snprintf(buf, sizeof(buf),
@@ -2338,11 +2267,6 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
   // (prewarmTotalMs stays ~100ms), so time them separately to prove which phase the
   // multi-second cost is in before optimizing.
   const auto tScanRender = millis();
-  // Diagnostics only: captured at the earliest possible point after the scan pass
-  // returns, before endScanAndPrewarm() reads/clears the same accumulator a few lines
-  // down -- see FontCacheManager::peekScanArabicTextSize().
-  const size_t preEndScanArabicBytes = fcm->peekScanArabicTextSize();
-  const int preEndScanArabicFontId = fcm->peekScanArabicFontId();
   // Scan the status bar too: a CJK book/chapter title redirected to the SD
   // fallback font joins the page's single batch prewarm instead of triggering
   // its own SD pass after the scope ends. After the diagnostic captures above,
@@ -2475,8 +2399,7 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
               "wait=%lums gray_write=%lums gray_display=%lums cleanup=%lums total=%lums (planes buffered: %d)",
               tPrewarm - t0, tBwRender - tPrewarm, tDisplay - tBwRender, tGrayRender - tDisplay, tWait - tGrayRender,
               tGrayWrite - tWait, tGrayDisplay - tGrayWrite, tEnd - tGrayDisplay, tEnd - t0, msbPlaneBuf ? 2 : 1);
-      logSlowPageTurn(t0, tScanRender, tPrewarm, tBwRender, tDisplay, tEnd, currentSpineIndex, epub->getTitle(), fcm,
-                      preEndScanArabicBytes, preEndScanArabicFontId);
+      logSlowPageTurn(t0, tScanRender, tPrewarm, tBwRender, tDisplay, tEnd, currentSpineIndex, epub->getTitle(), fcm);
     } else {
       auto scratch = makeUniqueNoThrow<uint8_t[]>(static_cast<size_t>(gwBytes) * STRIP_ROWS);
       renderer.waitRefreshComplete();
@@ -2527,8 +2450,7 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
                 "gray_msb=%lums gray_display=%lums cleanup=%lums total=%lums",
                 tPrewarm - t0, tBwRender - tPrewarm, tDisplay - tBwRender, tGrayLsb - tDisplay, tGrayMsb - tGrayLsb,
                 tGrayDisplay - tGrayMsb, tCleanup - tGrayDisplay, tEnd - t0);
-        logSlowPageTurn(t0, tScanRender, tPrewarm, tBwRender, tDisplay, tEnd, currentSpineIndex, epub->getTitle(), fcm,
-                        preEndScanArabicBytes, preEndScanArabicFontId);
+        logSlowPageTurn(t0, tScanRender, tPrewarm, tBwRender, tDisplay, tEnd, currentSpineIndex, epub->getTitle(), fcm);
       }
     }
   } else {
@@ -2563,14 +2485,12 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
               "gray_lsb=%lums gray_msb=%lums gray_display=%lums bw_restore=%lums total=%lums",
               tPrewarm - t0, tBwRender - tPrewarm, tDisplay - tBwRender, tBwStore - tDisplay, tGrayLsb - tBwStore,
               tGrayMsb - tGrayLsb, tGrayDisplay - tGrayMsb, tBwRestore - tGrayDisplay, tEnd - t0);
-      logSlowPageTurn(t0, tScanRender, tPrewarm, tBwRender, tDisplay, tEnd, currentSpineIndex, epub->getTitle(), fcm,
-                      preEndScanArabicBytes, preEndScanArabicFontId);
+      logSlowPageTurn(t0, tScanRender, tPrewarm, tBwRender, tDisplay, tEnd, currentSpineIndex, epub->getTitle(), fcm);
     } else {
       const auto tEnd = millis();
       LOG_DBG("ERS", "Page render: prewarm=%lums bw_render=%lums display=%lums total=%lums", tPrewarm - t0,
               tBwRender - tPrewarm, tDisplay - tBwRender, tEnd - t0);
-      logSlowPageTurn(t0, tScanRender, tPrewarm, tBwRender, tDisplay, tEnd, currentSpineIndex, epub->getTitle(), fcm,
-                      preEndScanArabicBytes, preEndScanArabicFontId);
+      logSlowPageTurn(t0, tScanRender, tPrewarm, tBwRender, tDisplay, tEnd, currentSpineIndex, epub->getTitle(), fcm);
     }
   }
 }

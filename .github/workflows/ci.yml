@@ -88,6 +88,12 @@ jobs:
         # See release.yml's identical step -- issue #179.
         run: python3 scripts/verify_platformio_packages.py
 
+      - name: Install cppcheck runtime dependency
+        run: |
+          # pioarduino's Linux cppcheck binary links against libpcre.so.3.
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libpcre3
+
       - name: Run cppcheck
         run: pio check --fail-on-defect low --fail-on-defect medium --fail-on-defect high
 

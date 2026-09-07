@@ -136,7 +136,11 @@ inline TouchPageTurn detectTouchPageTurn(GfxRenderer& renderer, const MappedInpu
 // through the key's long-press function.
 inline bool isTouchMenuTap(const GfxRenderer& renderer, const MappedInputManager& input) {
   if (!input.hasTouch()) return false;
-  if (!SETTINGS.tapForReaderMenu) return false;
+  // Upstream renamed this in the 1.6.22 sync: tapForReaderMenu -> showReaderMenu,
+  // widened from a 0/1 toggle to off / centre-tap / bottom-edge-swipe. 0 and 1 kept
+  // their old meaning, so this test is unchanged in behaviour; READER_MENU_TAP is
+  // still the default on the boards this path runs on.
+  if (SETTINGS.showReaderMenu != CrossPointSettings::READER_MENU_TAP) return false;
   int x = 0;
   int y = 0;
   if (!input.wasScreenTapped(x, y)) return false;
