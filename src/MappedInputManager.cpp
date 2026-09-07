@@ -474,3 +474,14 @@ int MappedInputManager::getPressedFrontButton() const {
   }
   return -1;
 }
+
+bool MappedInputManager::wasScreenLongPress(int& x, int& y) const {
+  float nx = 0.0f;
+  float ny = 0.0f;
+  if (!gpio.wasTouchLongPress(nx, ny)) return false;
+  // Consuming the long-press implies acting on it: suppress the rest of the
+  // contact so the finger lift can't also tap whatever the action opened.
+  gpio.suppressTouchContact();
+  renderer.tapToLogical(nx, ny, x, y);
+  return true;
+}

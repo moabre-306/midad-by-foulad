@@ -76,3 +76,12 @@ add_subdirectory(http_url_parts)
 add_subdirectory(void_element_normalizer)
 add_subdirectory(wifi_connect_policy)
 add_subdirectory(opds_cover_cache_path)
+add_subdirectory(font_cache_manager)
+add_subdirectory(css_parser)
+# Upstream suite, disabled in this fork: its GfxRenderer stub models upstream's
+# renderer, which has no kashida/Arabic-font API (getKashidaGlyphWidth,
+# wordHasKashidaPoint, getArabicFontIdFor, ArabicTextMarkers). Re-enable by
+# extending test/chapter_html_slim_parser/stubs to cover them. This fork's own
+# parser coverage lives in test/void_element_normalizer.
+# add_subdirectory(chapter_html_slim_parser)
+add_subdirectory(page_link)
