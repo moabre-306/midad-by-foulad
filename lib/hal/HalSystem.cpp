@@ -56,6 +56,9 @@ void IRAM_ATTR __wrap_panic_abort(const char* message) {
 // fault and made the report worthless while the serial log said exactly what
 // went wrong. Everything here is DRAM_ATTR and hand-rolled: this runs in panic
 // context, where flash may be inaccessible and snprintf is not safe to call.
+// mcause codes and the m-registers below are RISC-V; the C3 decodes them, the
+// S3 has no equivalent here and falls through to the backtrace alone.
+#if __riscv
 static DRAM_ATTR const char CAUSE_INSN_MISALIGN[] = "Instruction address misaligned";
 static DRAM_ATTR const char CAUSE_INSN_FAULT[] = "Instruction access fault";
 static DRAM_ATTR const char CAUSE_ILLEGAL[] = "Illegal instruction";
@@ -65,10 +68,11 @@ static DRAM_ATTR const char CAUSE_LOAD_FAULT[] = "Load access fault";
 static DRAM_ATTR const char CAUSE_STORE_MISALIGN[] = "Store address misaligned";
 static DRAM_ATTR const char CAUSE_STORE_FAULT[] = "Store access fault";
 static DRAM_ATTR const char CAUSE_OTHER[] = "CPU exception";
-static DRAM_ATTR const char HEX_DIGITS[] = "0123456789abcdef";
 static DRAM_ATTR const char TXT_MCAUSE[] = " mcause=";
 static DRAM_ATTR const char TXT_MEPC[] = " mepc=0x";
 static DRAM_ATTR const char TXT_MTVAL[] = " mtval=0x";
+#endif
+static DRAM_ATTR const char HEX_DIGITS[] = "0123456789abcdef";
 
 // Bounded append into panicMessage; returns the new length.
 static int IRAM_ATTR panicAppend(int at, const char* text) {
@@ -131,6 +135,7 @@ void IRAM_ATTR __wrap_panic_print_backtrace(const void* frame, int core) {
   }
   // Only when panic_abort() did not run -- an abort/assert message is always
   // more specific than a register decode, so never overwrite one.
+#if __riscv
   if (panicMessage[0] == '\0') {
     const RvExcFrame* f = (const RvExcFrame*)frame;
     const uint32_t cause = (uint32_t)f->mcause;
@@ -171,6 +176,7 @@ void IRAM_ATTR __wrap_panic_print_backtrace(const void* frame, int core) {
     at = panicAppend(at, TXT_MTVAL);
     panicAppendHex(at, (uint32_t)f->mtval);
   }
+#endif
 
   panicCaptureMarker = PANIC_CAPTURE_MAGIC;
 
