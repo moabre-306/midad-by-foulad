@@ -85,4 +85,7 @@ add_subdirectory(css_parser)
 # parser coverage lives in test/void_element_normalizer.
 # add_subdirectory(chapter_html_slim_parser)
 add_subdirectory(keyboard_layout_set)
+add_subdirectory(reading_heatmap_layout)
+add_subdirectory(keyboard_extension)
+add_subdirectory(stats_list_layout)
 add_subdirectory(page_link)

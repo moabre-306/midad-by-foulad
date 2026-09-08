@@ -47,10 +47,6 @@ class MappedInputManager {
   MappedInputManager(HalGPIO& gpio, const GfxRenderer& renderer) : gpio(gpio), renderer(renderer) {}
 
   void update() const { gpio.update(); }
-  // Touch long-press in logical coordinates, consuming the rest of the contact so
-  // the finger lift cannot also tap whatever the action opened. Ported from
-  // upstream in the 1.6.22 sync for the fui screens that expect it.
-  bool wasScreenLongPress(int& x, int& y) const;
   // Drives the X4 Pro power-button double-click gesture for one input frame;
   // a no-op on other boards. The main loop calls this once per iteration,
   // right after gpio.update(), every frame regardless of whether a release
@@ -74,6 +70,13 @@ class MappedInputManager {
   // off-target so FreeInkUI routing clears its pressed-element state.
   bool wasScreenTouchReleased() const;
   bool wasTapInRect(int x, int y, int width, int height) const;
+  // One-shot long-press from the SDK touch classifier, fired WHILE the finger
+  // is still down (stationary contact held past the SDK threshold). Consuming
+  // it suppresses the remainder of the contact — its continued hold and its
+  // release edge — so the ensuing finger lift can't also tap-dismiss the popup
+  // the long-press opened. The SDK owns that latch and self-clears it once the
+  // contact ends.
+  bool wasScreenLongPress(int& x, int& y) const;
 
   // Combined touch interaction for a band of equal rows with caller-supplied
   // geometry — the shared hit-test for lists the theme helpers above do not

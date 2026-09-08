@@ -157,9 +157,11 @@ enum UIIcon {
   Wifi,
   Hotspot,
   Bookmark,
+  Usb,
+  // Midad-only, appended after upstream's last value so the shared prefix
+  // keeps upstream's ordering. UIIcon is never persisted.
   Stats,
-  Apps,
-  Usb
+  Apps
 };
 
 enum class KeyboardKeyType { Normal, Shift, Mode, Space, Del, Ok, Disabled };
