@@ -84,4 +84,5 @@ add_subdirectory(css_parser)
 # extending test/chapter_html_slim_parser/stubs to cover them. This fork's own
 # parser coverage lives in test/void_element_normalizer.
 # add_subdirectory(chapter_html_slim_parser)
+add_subdirectory(keyboard_layout_set)
 add_subdirectory(page_link)
