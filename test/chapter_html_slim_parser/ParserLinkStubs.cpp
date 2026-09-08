@@ -29,9 +29,8 @@ bool computeVisualWordOrder(const std::vector<std::string>& words, bool, std::ve
 // both live in TextBlock's arena after the 1.6.22 merge.
 TextBlock::TextBlock(const std::vector<std::string>&, const std::vector<int16_t>&,
                      const std::vector<EpdFontFamily::Style>&, const std::vector<uint8_t>&,
-                     const std::vector<uint16_t>&, const BlockStyle& blockStyle,
-                     const std::vector<uint16_t>&, std::vector<std::string> rubyTexts,
-                     std::vector<LinkSpan> linkSpans)
+                     const std::vector<uint16_t>&, const BlockStyle& blockStyle, const std::vector<uint16_t>&,
+                     std::vector<std::string> rubyTexts, std::vector<LinkSpan> linkSpans)
     : blockStyle(blockStyle), rubyTexts(std::move(rubyTexts)), linkSpans(std::move(linkSpans)) {}
 
 bool TextBlock::hasRuby() const { return false; }
