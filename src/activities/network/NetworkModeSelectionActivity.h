@@ -31,6 +31,11 @@ class NetworkModeSelectionActivity final : public UiListActivity {
   void onCancel();
 
  private:
+  // File Transfer is entered through silentRestartToFileTransfer(), so on the
+  // fresh boot the panel still physically holds the pre-reboot frame. Promotes
+  // this screen's first refresh so the old frame cannot show through.
+  void onEnter() override;
+
   int listCount() const override;
   void buildScreen(UiScreen& screen) override;
   void activateIndex(int index) override;

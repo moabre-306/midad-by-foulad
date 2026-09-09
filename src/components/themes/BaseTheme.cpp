@@ -500,24 +500,26 @@ void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* t
 void BaseTheme::drawSubHeader(const GfxRenderer& renderer, Rect rect, const char* label, const char* rightLabel) const {
   constexpr int maxListValueWidth = 200;
 
+  // RTL: right-value moves to the left edge and the label right-anchors,
+  // mirroring the rest of the theme's Arabic-UI layout.
   const bool rtl = I18N.isRtl();
-  int rightSpace = BaseMetrics::values.contentSidePadding;
+  int labelWidth = contentWidth;
   if (rightLabel) {
-    auto truncatedRightLabel =
-        renderer.truncatedText(SMALL_FONT_ID, rightLabel, maxListValueWidth, EpdFontFamily::REGULAR);
-    int rightLabelWidth = renderer.getTextWidth(SMALL_FONT_ID, truncatedRightLabel.c_str());
+    auto truncatedRightLabel = renderer.truncatedText(SMALL_FONT_ID, rightLabel, contentWidth, EpdFontFamily::REGULAR);
+    const int rightLabelWidth = renderer.getTextWidth(SMALL_FONT_ID, truncatedRightLabel.c_str());
     const int rightLabelX = rtl ? rect.x + BaseMetrics::values.contentSidePadding
                                 : rect.x + rect.width - BaseMetrics::values.contentSidePadding - rightLabelWidth;
     renderer.drawText(SMALL_FONT_ID, rightLabelX, rect.y + 7, truncatedRightLabel.c_str());
-    rightSpace += rightLabelWidth + 10;
+    labelWidth = std::max(0, contentWidth - rightLabelWidth - labelGap);
   }
 
-  auto truncatedLabel = renderer.truncatedText(
-      UI_12_FONT_ID, label, rect.width - BaseMetrics::values.contentSidePadding - rightSpace, EpdFontFamily::REGULAR);
-  const int labelWidth = renderer.getTextWidth(UI_12_FONT_ID, truncatedLabel.c_str());
-  const int currentX = rtl ? rect.x + rect.width - BaseMetrics::values.contentSidePadding - labelWidth
+  if (labelWidth > 0) {
+    auto truncatedLabel = renderer.truncatedText(UI_12_FONT_ID, label, labelWidth, EpdFontFamily::REGULAR);
+    const int truncatedLabelWidth = renderer.getTextWidth(UI_12_FONT_ID, truncatedLabel.c_str());
+    const int labelX = rtl ? rect.x + rect.width - BaseMetrics::values.contentSidePadding - truncatedLabelWidth
                            : rect.x + BaseMetrics::values.contentSidePadding;
-  renderer.drawText(UI_12_FONT_ID, currentX, rect.y, truncatedLabel.c_str(), true, EpdFontFamily::REGULAR);
+    renderer.drawText(UI_12_FONT_ID, labelX, rect.y, truncatedLabel.c_str(), true, EpdFontFamily::REGULAR);
+  }
 }
 
 void BaseTheme::drawTabBar(const GfxRenderer& renderer, const Rect rect, const std::vector<TabInfo>& tabs,

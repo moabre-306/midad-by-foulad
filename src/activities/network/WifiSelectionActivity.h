@@ -130,6 +130,10 @@ class WifiSelectionActivity final : public Activity, private UiAppHost {
   enum class PendingOutcome { None, AutoConnectFailure, ConnectionFailed };
   PendingOutcome cancelOutcome = PendingOutcome::None;
 
+  // Connection timeout
+  static constexpr unsigned long CONNECTION_TIMEOUT_MS = 15000;
+  static constexpr unsigned long AUTO_CONNECTION_TIMEOUT_MS = 7000;
+
   // The UiAppHost app hosts the network list and the save/forget prompts
   // (themed rows and dialogs, touch routing); every other state keeps its
   // legacy centered-text rendering.
@@ -184,6 +188,7 @@ class WifiSelectionActivity final : public Activity, private UiAppHost {
   bool tryNextSavedNetworkFromScan();
   void handleAutoConnectFailure();
   void showNetworkListFromAutoConnect();
+  bool hasAttemptedAutoSsid(const std::string& ssid) const;
   std::string getSignalStrengthIndicator(int32_t rssi) const;
 
   void onComplete(bool connected);

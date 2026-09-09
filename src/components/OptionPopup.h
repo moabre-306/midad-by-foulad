@@ -36,6 +36,7 @@ class OptionPopup {
     selectedIndex = currentIndex;
     onSelectCallback = std::move(onSelect);
     uiReady = false;
+    confirmArmed = backArmed = false;
     active = true;
   }
 
@@ -49,6 +50,7 @@ class OptionPopup {
     selectedIndex = currentIndex;
     onSelectCallback = std::move(onSelect);
     uiReady = false;
+    confirmArmed = backArmed = false;
     active = true;
   }
 
@@ -59,6 +61,7 @@ class OptionPopup {
     selectedIndex = currentIndex;
     onSelectCallback = std::move(onSelect);
     uiReady = false;
+    confirmArmed = backArmed = false;
     active = true;
   }
 
@@ -107,6 +110,21 @@ class OptionPopup {
           }
         }
       }
+      return true;
+    }
+
+    // ScrollNext/ScrollPrevious, not NavNext/NavPrevious: this list is vertical, and
+    // Nav*'s RTL horizontal flip is for genuine left/right "next item" lists, not a
+    // vertical scroll -- under Arabic it would make the on-screen Up/Down hint labels
+    // point at the wrong physical front button.
+    if (input.wasPressed(MappedInputManager::Button::ScrollPrevious)) {
+      selectedIndex = (selectedIndex - 1 + count) % count;
+      requestUpdate();
+      return true;
+    }
+    if (input.wasPressed(MappedInputManager::Button::ScrollNext)) {
+      selectedIndex = (selectedIndex + 1) % count;
+      requestUpdate();
       return true;
     }
 
@@ -233,6 +251,7 @@ class OptionPopup {
   // away, e.g. its host screen closes from outside the popup's own input).
   void dismiss() {
     active = false;
+    confirmArmed = backArmed = false;
     onSelectCallback = nullptr;
   }
 

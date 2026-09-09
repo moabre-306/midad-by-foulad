@@ -46,6 +46,7 @@
 #include "MappedInputManager.h"
 #include "MidadAppSettings.h"
 #include "MidadArabicKeyboard.h"
+#include "MidadSettingsExtension.h"
 #include "OpdsServerStore.h"
 #include "OtaRollbackDetection.h"
 #include "OtaRollbackRecoveryPlan.h"
@@ -804,6 +805,16 @@ void setup() {
     SETTINGS.readerMenuStyle = CrossPointSettings::READER_MENU_TOOLBAR;
   }
   SETTINGS.loadFromFile();
+  MIDAD_APP_SETTINGS.loadFromFile();
+
+  // Midad's Arabic keyboard layer, through CrossPoint's generic keyboard
+  // extension point. Until this call the keyboard is exactly upstream's.
+  midad_arabic_keyboard::install();
+
+  // Midad's Apps tab and its actions, contributed through CrossPoint's generic
+  // Settings extension provider (PR #3274). Until this call SettingsActivity
+  // shows exactly upstream's built-in categories.
+  registerMidadSettingsExtension();
   RECENT_BOOKS.loadFromFile();
   GAME_SCORES.loadFromFile();
   TASBIH.loadFromFile();

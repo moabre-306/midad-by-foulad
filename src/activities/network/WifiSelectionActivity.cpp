@@ -408,7 +408,7 @@ void WifiSelectionActivity::promptPasswordEntry() {
   startActivityForResult(std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_ENTER_WIFI_PASSWORD),
                                                                  "",  // No initial text
                                                                  64,  // Max password length
-                                                                 InputType::Password),
+                                                                 InputType::Text),
                          [this](const ActivityResult& result) {
                            if (result.isCancelled) {
                              state = WifiSelectionState::NETWORK_LIST;
@@ -565,6 +565,12 @@ void WifiSelectionActivity::prepareRadio() {
     snprintf(hostname, sizeof(hostname), "CrossPoint-Reader-%02X%02X%02X%02X%02X%02X", mac[0], mac[1], mac[2], mac[3],
              mac[4], mac[5]);
     WiFi.setHostname(hostname);
+  } else {
+    LOG_ERR("WIFI", "Failed to read station MAC for hostname (err=%d)", static_cast<int>(macResult));
+  }
+
+  if (selectedRequiresPassword && !enteredPassword.empty()) {
+    WiFi.begin(selectedSSID.c_str(), enteredPassword.c_str());
   } else {
     LOG_ERR("WIFI", "Failed to read station MAC for hostname (err=%d)", static_cast<int>(macResult));
   }
@@ -758,7 +764,6 @@ void WifiSelectionActivity::checkConnectionStatus() {
       awaitingTimeSync = true;
       timeSyncStartMs = millis();
     }
-#endif
 
     // Save this as the last connected network, plus where it was actually joined so the
     // next attempt can skip the scan - SD card operations need lock as we use SPI for both

@@ -18,6 +18,8 @@
 #include "MidadAppSettings.h"
 #include "RecentBooksStore.h"
 #include "network/CoreCaCerts.h"
+#include "network/FirmwareBoardTag.h"
+#include "network/FirmwareUpdatePolicy.h"
 #include "network/HttpDownloader.h"
 #include "network/OtaUpdater.h"
 #include "reading/ReadingStatsStore.h"
@@ -127,6 +129,183 @@ std::string getSerialNumber() {
   char buf[20];
   snprintf(buf, sizeof(buf), "XTE-%02X%02X%02X%02X%02X%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
   return std::string(buf);
+}
+
+// Resolved once per registration: the build to offer, or empty for "nothing to say".
+// A std::string rather than a pointer into the response -- responseDoc dies with the
+// call and the Library reads this minutes later.
+static std::string latestFirmwareOffer;
+
+// Picks this device's channel out of {"stable", "rc"} and keeps the tag only if it
+// beats the running build.
+//
+// Channel comes from Settings -> System -> Pre-release (otaPrereleaseEnabled), which is
+// what "Check for Update" has always obeyed (OtaUpdater::checkForUpdate). This path used
+// to ignore that toggle and infer the channel from whether the RUNNING build had "-rc" in
+// its version instead, on the reasoning that a device running a release had opted out of
+// pre-releases by doing so. That was wrong once an explicit opt-in existed: someone on a
+// stable build who ticks Pre-release got RC offers from Check for Update and never from
+// Library, so the toggle silently did nothing here -- reported as the Library check being
+// broken.
+//
+// A device already running an -rc still gets rc offers whatever the toggle says: it is on
+// that channel already, and the alternative is stranding it there with no route forward.
+// Either way the stable tag remains the fallback, which is what carries an RC device off a
+// pre-release once the equal-numbered release lands.
+// Every outcome below is recorded to the SD debug log, not just the one that produces an
+// offer. From outside the device "the server named nothing" and "the server named a build
+// that is not newer than this one" are the same observation -- no popup -- but they are
+// completely different problems, and telling them apart is otherwise impossible after the
+// fact: the LOG_INF here reaches serial only, which nobody has attached while actually
+// using the device. A report that the Library update check "stopped working" is
+// unanswerable without this line.
+static void captureLatestFirmware(JsonVariantConst latest) {
+  latestFirmwareOffer.clear();
+
+  const auto tagOf = [](JsonVariantConst v) -> const char* {
+    return v.is<const char*>() ? v.as<const char*>() : nullptr;
+  };
+  const auto orNone = [](const char* s) { return s ? s : "(none)"; };
+
+  if (latest.isNull()) {
+    // Older server, or a current one that could not reach GitHub. Absent means "no
+    // information", never "up to date".
+    diagLog(std::string("firmware check: server sent no latest_firmware (running ") + CROSSPOINT_VERSION + ")");
+    return;
+  }
+
+  const char* rcTag = tagOf(latest["rc"]);
+  const char* stableTag = tagOf(latest["stable"]);
+
+  // Optional per-channel asset lists ("rc_assets"/"stable_assets": arrays of
+  // release asset filenames). A server that names them lets any board verify
+  // its own asset exists before an offer goes up; without them only the
+  // default firmware.bin boards are offerable (see channelHasBoardAsset) --
+  // the X4 Pro once got a dead-end prompt for a release that carried only the
+  // C3 image. Pointers reference responseDoc, which outlives this call.
+  constexpr size_t MAX_ASSETS = 8;
+  const auto readAssets = [](JsonVariantConst v, const char** names, firmware_update_policy::ChannelInfo& channel) {
+    JsonArrayConst arr = v.as<JsonArrayConst>();
+    if (arr.isNull()) return;
+    channel.assetsListed = true;
+    channel.assets = names;
+    for (JsonVariantConst entry : arr) {
+      if (channel.assetCount >= MAX_ASSETS) break;
+      if (entry.is<const char*>()) names[channel.assetCount++] = entry.as<const char*>();
+    }
+  };
+
+  firmware_update_policy::ChannelInfo rcInfo{rcTag, nullptr, 0, false};
+  firmware_update_policy::ChannelInfo stableInfo{stableTag, nullptr, 0, false};
+  const char* rcAssets[MAX_ASSETS];
+  const char* stableAssets[MAX_ASSETS];
+  readAssets(latest["rc_assets"], rcAssets, rcInfo);
+  readAssets(latest["stable_assets"], stableAssets, stableInfo);
+
+  const bool wantsPrerelease = SETTINGS.otaPrereleaseEnabled != 0 || strstr(CROSSPOINT_VERSION, "-rc") != nullptr;
+
+  char boardAsset[48];
+  firmware_update_policy::boardAssetFileName(board_tag::boardName(), board_tag::boardNameLen(), boardAsset,
+                                             sizeof(boardAsset));
+
+  const auto decision =
+      firmware_update_policy::chooseOffer(rcInfo, stableInfo, wantsPrerelease, CROSSPOINT_VERSION, boardAsset);
+
+  if (decision.outcome == firmware_update_policy::OfferOutcome::MISSING_BOARD_ASSET) {
+    // A newer build exists but no release carries this board's image; offering
+    // it anyway would only lead to a dead-end "no update" screen after the
+    // reboot into the OTA flow. Suppressed, and recorded as its own outcome so
+    // it is distinguishable from "nothing newer" after the fact.
+    diagLog(std::string("firmware check: newer build (rc=") + orNone(rcTag) + " stable=" + orNone(stableTag) +
+            ") has no " + boardAsset + " asset for this board -- not offering (running " + CROSSPOINT_VERSION + ")");
+    return;
+  }
+  if (decision.outcome != firmware_update_policy::OfferOutcome::OFFER) {
+    // The channel is logged too: "rc names a newer build but this device is on the stable
+    // channel" and "rc names nothing" both end here, and only the toggle's state separates
+    // them.
+    diagLog(std::string("firmware check: rc=") + orNone(rcTag) + " stable=" + orNone(stableTag) +
+            " channel=" + (wantsPrerelease ? "pre" : "stable") + " -- none newer than " + CROSSPOINT_VERSION);
+    return;
+  }
+
+  latestFirmwareOffer = decision.tag;
+  diagLog(std::string("firmware check: offering ") + decision.tag + " (rc=" + orNone(rcTag) +
+          " stable=" + orNone(stableTag) + " channel=" + (wantsPrerelease ? "pre" : "stable") + ", running " +
+          CROSSPOINT_VERSION + ")");
+  LOG_INF(TAG, "Server reports newer firmware: %s (running %s)", decision.tag, CROSSPOINT_VERSION);
+}
+
+void registerDevice(const std::string& username, const std::string& password) {
+  if (!wifiConnected() || username.empty() || password.empty()) return;
+
+  JsonDocument doc;
+  doc["serial_number"] = getSerialNumber();
+  doc["name"] = displayName();
+  doc["model"] = modelName();
+  doc["firmware_version"] = CROSSPOINT_VERSION;
+  addSettingsReport(doc["settings"].to<JsonObject>());
+  std::string body;
+  serializeJson(doc, body);
+
+  std::string response;
+  const auto result = HttpDownloader::postJson(deviceEndpoint(), body, username, password, response);
+  if (result != HttpDownloader::OK) {
+    const int status = HttpDownloader::getLastFailure().detail;
+    LOG_ERR(TAG, "Device registration failed (status=%d)", status);
+    diagLog("register serial=" + getSerialNumber() + " -> FAIL status=" + std::to_string(status));
+    return;
+  }
+  LOG_DBG(TAG, "Device registered: %s", response.c_str());
+  diagLog("register serial=" + getSerialNumber() + " -> ok");
+
+  JsonDocument responseDoc;
+  if (!deserializeJson(responseDoc, response)) {
+    applySettingsFromServer(responseDoc["settings"].as<JsonObjectConst>());
+    captureLatestFirmware(responseDoc["latest_firmware"]);
+  }
+}
+
+void reportReadingStats(const std::string& username, const std::string& password, const std::string& fouladBookId,
+                        const int progressPercent, const std::string& lastPosition, const uint32_t secondsRead) {
+  if (!wifiConnected() || username.empty() || password.empty() || fouladBookId.empty()) return;
+
+  if (postReadingStatsOnce(username, password, fouladBookId, progressPercent, lastPosition, secondsRead)) {
+    return;
+  }
+
+  const auto failure = HttpDownloader::getLastFailure();
+  if (failure.stage == HttpDownloader::FailStage::STATUS && failure.detail == 404) {
+    // Unknown device server-side -- register once, then retry exactly once.
+    LOG_DBG(TAG, "Reading-stats 404 (device not registered yet), registering and retrying");
+    diagLog("reading-stats book=" + fouladBookId + " got 404, registering and retrying");
+    registerDevice(username, password);
+    if (postReadingStatsOnce(username, password, fouladBookId, progressPercent, lastPosition, secondsRead)) return;
+  }
+  LOG_ERR(TAG, "Reading-stats report failed (status=%d)", HttpDownloader::getLastFailure().detail);
+  diagLog("reading-stats book=" + fouladBookId +
+          " gave up, status=" + std::to_string(HttpDownloader::getLastFailure().detail));
+}
+
+void flushPendingReadingStats(const std::string& username, const std::string& password) {
+  if (!wifiConnected() || username.empty() || password.empty()) return;
+
+  // Driven by the stats store, not RecentBooksStore. Recents caps at 10 and
+  // evicts, so iterating it silently skipped every catalog book that had been
+  // read but pushed out of the top 10 -- those never produced a library_reading
+  // row on the server no matter how often the device reconnected
+  // (INSTRUCTIONS-14). The stats store holds up to MAX_BOOKS and now carries the
+  // id itself, so the two lists can no longer disagree about what is reportable.
+  READING_STATS.ensureLoaded();
+  int flushed = 0;
+  for (const auto& stats : READING_STATS.getBooks()) {
+    if (stats.fouladBookId.empty()) continue;  // side-loaded, or read before v3
+    if (stats.totalReadingMs == 0) continue;
+    reportReadingStats(username, password, stats.fouladBookId, stats.lastProgressPercent, "",
+                       static_cast<uint32_t>(stats.totalReadingMs / 1000));
+    flushed++;
+  }
+  if (flushed > 0) diagLog("flush: reported " + std::to_string(flushed) + " book(s)");
 }
 
 void flushPendingKOReaderSync() {

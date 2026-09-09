@@ -49,6 +49,13 @@ NetworkModeSelectionActivity::NetworkModeSelectionActivity(GfxRenderer& renderer
   }
 }
 
+void NetworkModeSelectionActivity::onEnter() {
+  // A FAST first paint only drives the pixels this menu draws, leaving the
+  // pre-reboot frame showing through as an overlay (see the header comment).
+  renderer.promoteNextRefresh(HalDisplay::HALF_REFRESH);
+  UiListActivity::onEnter();
+}
+
 int NetworkModeSelectionActivity::listCount() const { return MENU_ITEM_COUNT; }
 
 const char* NetworkModeSelectionActivity::headerTitle() const { return tr(STR_FILE_TRANSFER); }

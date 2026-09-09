@@ -26,6 +26,8 @@ inline std::string_view urlOrigin(std::string_view url) {
   return pathStart == std::string_view::npos ? url : url.substr(0, pathStart);
 }
 
+// urlIsHttps() lives in src/network/HttpVerifiedFetch.h alongside the rest of
+// the verified-fetch preconditions.
 // The rule "credentials never cross an origin boundary", for a redirect chain --
 // written down once, and testable on a host, because getting it wrong hands a
 // device token to whoever controls the redirect target.
