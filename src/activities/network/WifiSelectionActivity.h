@@ -188,7 +188,6 @@ class WifiSelectionActivity final : public Activity, private UiAppHost {
   bool tryNextSavedNetworkFromScan();
   void handleAutoConnectFailure();
   void showNetworkListFromAutoConnect();
-  bool hasAttemptedAutoSsid(const std::string& ssid) const;
   std::string getSignalStrengthIndicator(int32_t rssi) const;
 
   void onComplete(bool connected);

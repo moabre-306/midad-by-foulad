@@ -764,6 +764,7 @@ void WifiSelectionActivity::checkConnectionStatus() {
       awaitingTimeSync = true;
       timeSyncStartMs = millis();
     }
+#endif
 
     // Save this as the last connected network, plus where it was actually joined so the
     // next attempt can skip the scan - SD card operations need lock as we use SPI for both

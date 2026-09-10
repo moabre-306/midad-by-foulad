@@ -4,7 +4,6 @@
 #include <GfxRenderer.h>
 #include <HalDisplay.h>
 #include <Logging.h>
-#include <WiFi.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -23,13 +22,9 @@
 #include "SdFirmwareUpdateActivity.h"
 #include "SettingsExtension.h"
 #include "SettingsList.h"
-#include "SilentRestart.h"
 #include "StatusBarSettingsActivity.h"
 #include "TextSettingsActivity.h"
-#include "activities/browser/FouladQrLoginActivity.h"
-#include "activities/home/FileBrowserActivity.h"
 #include "activities/network/WifiSelectionActivity.h"
-#include "activities/util/ConfirmationActivity.h"
 #include "activities/util/IntervalSelectionActivity.h"
 #include "components/UITheme.h"
 #include "components/UIThemeTokens.h"
@@ -181,8 +176,6 @@ void SettingsActivity::onEnter() {
   rebuildSettingsLists();
 }
 
-// Trigger first update
-requestUpdate();
 void SettingsActivity::selectCategory(const int categoryIndex) {
   selectedCategoryIndex = categoryIndex;
   if (!tabRange().isExtension(selectedCategoryIndex)) {
@@ -613,54 +606,12 @@ void SettingsActivity::toggleCurrentSetting() {
                                  rebuildSettingsLists();
                                });
         break;
-      case SettingAction::Language:
-        startActivityForResult(std::make_unique<LanguageSelectActivity>(renderer, mappedInput), resultHandler);
-        break;
-      case SettingAction::BrowseFiles:
-        startActivityForResult(std::make_unique<FileBrowserActivity>(renderer, mappedInput), resultHandler);
-        break;
-      case SettingAction::FileTransfer:
-        // Reboot into the web server on a fresh heap (see SilentRestart.h):
-        // starting it from a long-running session leaves the WiFi driver and
-        // TCP buffers fighting a fragmented heap and page loads crawl. The
-        // activity's own exit path already silentRestart()s back to Home.
-        silentRestartToFileTransfer();
-        break;
-      case SettingAction::FouladEbooksLogout: {
-        // Confirm, then reboot into the sign-out. The credential is only cleared
-        // once the server confirms removal, so the device never believes it is
-        // signed out while the account still lists it.
-        //
-        // The reboot is not cosmetic. The
-        // self-revoke POST is a TLS handshake, and from Settings with WiFi already
-        // up it found a 9,716-byte largest block against the ~17KB a handshake
-        // needs -- it could not open the connection at all. Same treatment OTA,
-        // File Transfer and QR sign-in already get.
-        auto logoutHandler = [this](const ActivityResult& result) {
-          if (result.isCancelled) {
-            rebuildSettingsLists();
-            selectedSettingIndex = std::min(selectedSettingIndex, settingsCount);
-            return;
-          }
-          silentRestartToLogout();  // does not return
-        };
-        startActivityForResult(
-            std::make_unique<ConfirmationActivity>(renderer, mappedInput, tr(STR_FOULAD_EBOOKS_LOGOUT_CONFIRM), ""),
-            logoutHandler);
-        break;
-      }
-      case SettingAction::FouladEbooksLogin:
-        // Same QR sign-in as the first-run home entry. On success it stores the
-        // issued token and silent-reboots into the catalog on a fresh heap; on
-        // cancel we return here, so rebuild the list either way to flip this row
-        // between Login and Logout.
-        startActivityForResult(std::make_unique<FouladQrLoginActivity>(renderer, mappedInput),
       case SettingAction::TextSettings:
         startActivityForResult(std::make_unique<TextSettingsActivity>(renderer, mappedInput, &sdFontSystem.registry(),
                                                                       TextSettingsActivity::Tab::Family),
                                [this](const ActivityResult&) {
-          // TextSettingsActivity saves on each change; no save needed here.
-          rebuildSettingsLists();
+                                 // TextSettingsActivity saves on each change; no save needed here.
+                                 rebuildSettingsLists();
                                });
         break;
       case SettingAction::Language:
@@ -669,8 +620,8 @@ void SettingsActivity::toggleCurrentSetting() {
         // needs an explicit rebuild here rather than the generic resultHandler.
         startActivityForResult(std::make_unique<LanguageSelectActivity>(renderer, mappedInput),
                                [this](const ActivityResult&) {
-          SETTINGS.saveToFile();
-          rebuildSettingsLists();
+                                 SETTINGS.saveToFile();
+                                 rebuildSettingsLists();
                                });
         break;
       case SettingAction::None:
@@ -691,8 +642,7 @@ void SettingsActivity::toggleCurrentSetting() {
         // startActivityForResult() stores the handler on the activity itself, and
         // ActivityManager clears it once consumed, so the member is null exactly
         // when the action opened no screen.
-        runAfterExtensionAction(Activity::resultHandler, [this] {
-          rebuildSettingsLists(); });
+        runAfterExtensionAction(Activity::resultHandler, [this] { rebuildSettingsLists(); });
         break;
     }
     return;  // Results will be handled in the result handler, so we can return early here

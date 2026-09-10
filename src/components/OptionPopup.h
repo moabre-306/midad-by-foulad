@@ -136,12 +136,24 @@ class OptionPopup {
       selectedIndex = (selectedIndex + 1) % count;
       requestUpdate();
       return true;
-    } else if (input.wasReleased(MappedInputManager::Button::Confirm)) {
+    }
+
+    // Confirm/Back act on the RELEASE of a press that happened while the popup was
+    // already open ("armed"), so one physical click is consumed entirely by the
+    // popup. Acting on the press alone left its release for the caller: a
+    // release-triggered caller (the reader drawer) then saw a stray Confirm release
+    // and re-opened the popup ("keeps asking me for font size"), or a stray Back
+    // release and closed the whole drawer. The arming requirement also swallows the
+    // release of the click that OPENED the popup for press-triggered callers.
+    if (input.wasPressed(MappedInputManager::Button::Confirm)) confirmArmed = true;
+    if (input.wasPressed(MappedInputManager::Button::Back)) backArmed = true;
+    if (confirmArmed && input.wasReleased(MappedInputManager::Button::Confirm)) {
       active = false;
       if (onSelectCallback) onSelectCallback(selectedIndex);
       requestUpdate();
       return true;
-    } else if (input.wasReleased(MappedInputManager::Button::Back)) {
+    }
+    if (backArmed && input.wasReleased(MappedInputManager::Button::Back)) {
       active = false;
       requestUpdate();
       return true;
@@ -151,7 +163,8 @@ class OptionPopup {
 
   bool processRender(GfxRenderer& renderer, const MappedInputManager& input) const {
     if (!active) return false;
-    const auto popupLabels = input.mapLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
+    const auto popupLabels =
+        input.mapLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN), /*rtlSwap=*/false);
     GUI.drawButtonHints(renderer, popupLabels.btn1, popupLabels.btn2, popupLabels.btn3, popupLabels.btn4);
     render(renderer);
     renderer.displayBuffer();
@@ -265,6 +278,9 @@ class OptionPopup {
   static constexpr freeink::ui::ActionId ACTION_CHROME = 2;
 
   bool active = false;
+  // Release-side edge filters -- see handleInput().
+  bool confirmArmed = false;
+  bool backArmed = false;
   std::string title;
   std::vector<std::string> ownedStrings;
   int selectedIndex = 0;
