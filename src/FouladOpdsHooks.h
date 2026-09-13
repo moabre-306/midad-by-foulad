@@ -13,7 +13,7 @@
 // Foulad eBooks catalog, not generic OPDS browsing. Kept out of that
 // upstream-owned activity per docs/upstream-sync-architecture.md's Phase C.
 //
-// extractFouladBookId()/acquisitionExtension()/isNewsFeed() are declared in
+// extractFouladBookId()/acquisitionExtension() are declared in
 // FouladOpdsHooksPure.h (included above) and implemented in
 // FouladOpdsHooksPure.cpp, which has no HAL dependency -- see that header
 // for why. Everything below needs HalStorage/Epub/FouladDeviceTracking, so
@@ -31,7 +31,6 @@ void reportDeviceTrackingOnConnect(const OpdsServer& server);
 // stale download at `filename`, and its render cache, are removed so the
 // next download replaces it cleanly instead of the reader finding
 // yesterday's cached pages still valid.
-void removeExistingNewsDownload(const std::string& filename);
 
 // Associates a just-opened/just-downloaded book at `filename` with its
 // Foulad catalog id for later reading-stats reporting -- only when `server`

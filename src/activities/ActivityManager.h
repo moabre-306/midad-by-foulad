@@ -151,7 +151,6 @@ class ActivityManager {
   void goToBrowser();
   void goToFouladEbooks();
   // Apps -> News: the OPDS browser rooted at the account's feed subscriptions.
-  void goToNews();
   // Entered only by silentRestartToLogout(), so the sign-out handshake gets a
   // fresh heap. Owns credential lookup and clearing, since there is no parent
   // activity to hand the result back to.

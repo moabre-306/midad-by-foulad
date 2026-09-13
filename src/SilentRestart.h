@@ -31,7 +31,6 @@ void silentRestartToFileTransfer();
 // heap sliding 36KB -> 14KB across cover fetches). The browser's exit path
 // already silent-restarts when WiFi was up; this makes entry symmetric.
 void silentRestartToFouladEbooks();
-void silentRestartToNews();  // Apps -> News (EINK_NEWS_TASKS.md)
 
 // Sign-out, same rationale as the flows above and for a measured reason: the
 // self-revoke POST is a TLS handshake, and reached from Settings with WiFi

@@ -23,11 +23,6 @@ constexpr char FOULAD_EBOOKS_NAME[] = "Midad";
 // authenticated device feed pages at 12 while the public Store stays at 25, and
 // the browser only ever follows rel="next"/rel="previous".
 constexpr char FOULAD_EBOOKS_URL[] = "https://api.midad.one/opds";
-// News feeds (EINK_NEWS_TASKS.md). A normal OPDS acquisition feed, one entry per
-// subscription, browsed by the same activity as the catalog -- News is a different
-// root, not a different browser. Entry ids live in their own namespace
-// ("urn:midad:feed:<id>"), which is why extractFouladBookId checks the prefix.
-constexpr char FOULAD_EBOOKS_NEWS_URL[] = "https://midad.one/opds/news";
 
 // Downloaded news lives in its own folder rather than beside the books at the SD
 // root. It is not a book: it has no author, it is replaced wholesale every time you
@@ -65,19 +60,6 @@ constexpr char FOULAD_EBOOKS_DEVICE_LOGIN_POLL_URL[] = "https://api.midad.one/de
 // device credential may perform; every other account mutation answers it 401.
 // Answers 204 on success and 401 when the token is already dead.
 constexpr char FOULAD_EBOOKS_DEVICE_SIGNOUT_URL[] = "https://api.midad.one/device-login/self-revoke";
-
-// Cross-device reading position (EINK_PAGE_SYNC_TASKS.md). POST reports where this
-// device is and returns where the ACCOUNT is in one round trip; GET only looks, for
-// when there is nothing honest to report yet. Same opds.auth Basic Auth as the feed.
-//
-// The shared currency is progress_percent, not page: the phone paginates with
-// epub.js at its own font size and cannot act on a page number computed for a
-// 5-inch panel. page/total_pages are sent for display only.
-//
-// Carries the device credential in an Authorization header, so it must never be
-// plain http://. Core is replacing this with /resume/v1/items/{id}/position on
-// api.midad.one; this stays pointed at the legacy host until that lands.
-constexpr char FOULAD_EBOOKS_READING_POSITION_URL[] = "https://midad.one/opds/reading-position";
 
 // Crash-report upload. Legacy, like reading-position above and for the same
 // reason: the route lives on midad.one and was never carried over to Core, so

@@ -18,7 +18,15 @@
 // filter). Plain http for the same reason as FOULAD_EBOOKS_URL -- see
 // src/FouladEbooksConfig.h. Overridable for local testing.
 #ifndef FOULAD_FONTS_CATALOG_URL
-#define FOULAD_FONTS_CATALOG_URL "https://midad.one/api/fonts/catalog"
+// Midad Core's font catalogue. "v4" is a served version in Core's
+// CPFONT_VERSIONS: there is deliberately no default and no "latest", so the
+// segment must name a published version or the request fails. v5 is accepted
+// but publishes nothing yet and returns 503.
+//
+// The file URLs are NOT built from this constant -- parseCatalog() takes
+// baseUrl from the response body and appends each file name, so the server
+// chooses where files come from.
+#define FOULAD_FONTS_CATALOG_URL "https://api.midad.one/fonts/v4/catalog"
 #endif
 
 #ifndef FONT_MANIFEST_URL

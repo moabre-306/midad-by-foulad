@@ -69,14 +69,12 @@ const std::vector<AppsActivity::AppEntry>& AppsActivity::entries() {
          MIDAD_APP_SETTINGS.tasbihEnabled = v;
          MIDAD_APP_SETTINGS.saveToFile();
        }},
-      // News is deliberately absent: the server removed /opds/news (foulad-ebooks
-      // PR #113, live 2026-08-05) after News-as-EPUB kept producing on-device parse
-      // crashes -- News is an app-only feature now (the phone app renders native
-      // article cards). A tile here would only ever reach a permanent 404. The
-      // launch plumbing (AppId::News, goToNews) stays unreachable rather than
-      // being torn out of the silent-reboot target table mid-release; Core has
-      // since confirmed it will never serve News, so it can go on the next
-      // cleanup pass.
+      // News is gone, not hidden: the server removed /opds/news (foulad-ebooks
+      // PR #113, live 2026-08-05) after News-as-EPUB kept producing on-device
+      // parse crashes, and Core confirmed it will never serve News -- the phone
+      // app renders native article cards instead. The plumbing that was left
+      // unreachable for a later cleanup pass has been removed with it. /News on
+      // the SD card is still recognised so existing downloads stay out of My Books.
       {AppId::Stopwatch, StrId::STR_STOPWATCH, StopwatchIcon, [] { return MIDAD_APP_SETTINGS.stopwatchEnabled; },
        [](uint8_t v) {
          MIDAD_APP_SETTINGS.stopwatchEnabled = v;
@@ -146,12 +144,6 @@ bool AppsActivity::launch(const AppEntry& entry) {
       return true;
     case AppId::Tasbih:
       startActivityForResult(std::make_unique<TasbihActivity>(renderer, mappedInput), [](const ActivityResult&) {});
-      return true;
-    case AppId::News:
-      // Reboots in, like the Library does: News browses OPDS over WiFi and then
-      // downloads an EPUB, the same stack of allocations that made
-      // goToFouladEbooks() restart first. Does not return.
-      silentRestartToNews();
       return true;
     case AppId::Stopwatch:
       startActivityForResult(std::make_unique<StopwatchActivity>(renderer, mappedInput), [](const ActivityResult&) {});

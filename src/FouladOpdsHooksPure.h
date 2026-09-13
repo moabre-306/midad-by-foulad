@@ -25,9 +25,6 @@ std::string extractFouladBookId(const std::string& entryId);
 // Defaults to ".epub" for anything else.
 std::string acquisitionExtension(const std::string& acquisitionType);
 
-// True when `serverUrl` is the Foulad eBooks News feed root.
-bool isNewsFeed(const std::string& serverUrl);
-
 // Pure gating decision for a periodic device-tracking call: true only when
 // actually browsing (not loading/downloading), the server is Foulad eBooks,
 // WiFi is connected, and at least `intervalMs` have elapsed since

@@ -236,7 +236,6 @@ constexpr uint32_t SILENT_REBOOT_TARGET_FOULAD_EBOOKS = 5;
 constexpr uint32_t SILENT_REBOOT_TARGET_GYM = 6;
 constexpr uint32_t SILENT_REBOOT_TARGET_SETTINGS = 7;
 constexpr uint32_t SILENT_REBOOT_TARGET_DICTIONARY = 8;
-constexpr uint32_t SILENT_REBOOT_TARGET_NEWS = 9;
 constexpr uint32_t SILENT_REBOOT_TARGET_LOGOUT = 10;
 constexpr uint32_t SILENT_REBOOT_TARGET_PAIRING = 11;
 constexpr uint32_t SILENT_REBOOT_TARGET_BLUETOOTH = 12;
@@ -398,16 +397,6 @@ void silentRestartToLogout() {
   silentRebootTarget = SILENT_REBOOT_TARGET_LOGOUT;
   silentRebootMagic = SILENT_REBOOT_MAGIC;
   LOG_DBG("MAIN", "Silent restart (target=logout)");
-  GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
-  delay(50);
-  ESP.restart();
-}
-
-void silentRestartToNews() {
-  if (deepSleepInProgress) return;  // sleeping supersedes the heap-defrag reboot
-  silentRebootTarget = SILENT_REBOOT_TARGET_NEWS;
-  silentRebootMagic = SILENT_REBOOT_MAGIC;
-  LOG_DBG("MAIN", "Silent restart (target=news)");
   GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
   delay(50);
   ESP.restart();
@@ -1009,10 +998,6 @@ void setup() {
   } else if (resume == BootResume::Silent && snapshotTarget == SILENT_REBOOT_TARGET_LOGOUT) {
     // Fresh heap for the sign-out handshake -- see silentRestartToLogout().
     activityManager.goToLogout();
-  } else if (resume == BootResume::Silent && snapshotTarget == SILENT_REBOOT_TARGET_NEWS) {
-    // Same fresh-heap treatment as the catalog, for the same reasons: WiFi, feed
-    // parsing and an EPUB download stacked on one session's heap.
-    activityManager.goToNews();
   } else if (resume == BootResume::Silent && snapshotTarget == SILENT_REBOOT_TARGET_FOULAD_EBOOKS) {
     // Same fresh-heap treatment: OPDS browsing stacks WiFi + feed parsing +
     // cover download/decode allocations; started from a fragmented session

@@ -40,20 +40,6 @@ void reportDeviceTrackingOnConnect(const OpdsServer& server) {
   FouladDeviceTracking::sendHeartbeat(server.username, server.password);
 }
 
-void removeExistingNewsDownload(const std::string& filename) {
-  if (!Storage.exists(filename.c_str())) return;
-  Storage.remove(filename.c_str());
-  // The cache directory is keyed on the FILE PATH (Epub.h: "epub_" +
-  // hash(filepath)) and is only validated against the cache format version --
-  // never against the file's size or contents. A feed keeps the same path
-  // every time, so without this the reader would find yesterday's book.bin
-  // and rendered sections still valid and read the old articles out of
-  // cache, no matter how fresh the download was. Progress goes too, which is
-  // correct: page 4 of yesterday's articles means nothing in today's.
-  const std::string cacheDir = Epub(filename, "/.crosspoint").getCachePath();
-  if (Storage.exists(cacheDir.c_str())) Storage.removeDir(cacheDir.c_str());
-}
-
 void tagFouladBookId(const std::string& filename, const OpdsEntry& book, const OpdsServer& server) {
   if (server.url != FOULAD_EBOOKS_URL) return;
   const std::string fouladBookId = extractFouladBookId(book.id);

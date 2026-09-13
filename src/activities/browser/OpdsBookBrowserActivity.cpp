@@ -684,7 +684,7 @@ void OpdsBookBrowserActivity::drawGridCell(const GridLayout& layout, const int p
     }
   }
   renderer.drawRect(cellX, cellY, layout.coverWidth, layout.coverHeight);
-  if (!drawn && (FouladOpdsHooks::isNewsFeed(server.url) || entry.type == OpdsEntryType::NAVIGATION)) {
+  if (!drawn && entry.type == OpdsEntryType::NAVIGATION) {
     // News entries carry no cover art -- there is no image link in the feed, so
     // nothing failed to download and nothing is going to appear later. The generic
     // book icon reads as a book that did not load; the feed's own name on a
@@ -1053,7 +1053,6 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
   // On the News root the advertised search is the BOOK search (/opds/search), which
   // would put a row inside News that returns books. Wrong answer to the wrong
   // question, so News does not offer it.
-  if (FouladOpdsHooks::isNewsFeed(server.url)) searchTemplate.clear();
   feedNextUrl = parser->getNextPageUrl();
   feedPrevUrl = parser->getPrevPageUrl();
   entries = std::move(*parser).getEntries();
@@ -1107,7 +1106,7 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
     // An empty feed is the normal, successful answer to "this account has no
     // subscriptions" -- not an error (EINK_NEWS_TASKS.md §2). Say what to do next
     // instead, because the thing to do is on the phone and nothing here can do it.
-    errorMessage = FouladOpdsHooks::isNewsFeed(server.url) ? tr(STR_NEWS_EMPTY) : tr(STR_NO_ENTRIES);
+    errorMessage = tr(STR_NO_ENTRIES);
   }
 
   // Crash report: a heap-corruption abort (multi_heap assert_valid_block) landed inside
@@ -1215,15 +1214,11 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& bookRef) {
   // Extension/folder/replace policy is Foulad eBooks catalog-specific (XTC-only
   // books, News' own folder and replace-not-accumulate rule) -- see FouladOpdsHooks.h.
   const std::string extension = FouladOpdsHooks::acquisitionExtension(book.acquisitionType);
-  const bool isNewsFeed = FouladOpdsHooks::isNewsFeed(server.url);
-  if (isNewsFeed) Storage.mkdir(FOULAD_NEWS_DIR);
   const std::string filename =
-      (isNewsFeed ? std::string(FOULAD_NEWS_DIR) + "/" : std::string("/")) +
-      StringUtils::sanitizeFilename((book.author.empty() ? "" : book.author + " - ") + book.title) + extension;
+      std::string("/") + StringUtils::sanitizeFilename((book.author.empty() ? "" : book.author + " - ") + book.title) +
+      extension;
 
-  if (isNewsFeed) FouladOpdsHooks::removeExistingNewsDownload(filename);
-
-  if (!isNewsFeed && Storage.exists(filename.c_str())) {
+  if (Storage.exists(filename.c_str())) {
     // Already downloaded -- open it directly rather than downloading again.
     FouladOpdsHooks::tagFouladBookId(filename, book, server);
     pendingReaderPath = filename;
