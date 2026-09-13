@@ -39,7 +39,7 @@ inline bool isNewsBookPath(const std::string_view path) { return path.rfind("/Ne
 // and responds with download URLs. Open endpoint, no auth -- rate-limited
 // server-side. Stays on the legacy host deliberately: the converter is a Python
 // service, so Core has no equivalent and will not gain one.
-constexpr char FOULAD_EBOOKS_FONT_CONVERT_URL[] = "https://midad.one/api/fonts/convert";
+constexpr char FOULAD_EBOOKS_FONT_CONVERT_URL[] = "https://api.midad.one/api/fonts/convert";
 
 // QR-code sign-in (see FouladDeviceLogin.h). Unauthenticated JSON POSTs, no
 // cookies/CSRF. Nothing secret is sent TO these endpoints; the token they return
