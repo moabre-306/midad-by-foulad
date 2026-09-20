@@ -152,3 +152,37 @@ remain outstanding and are the repo owner's to perform.** Step 5 does not apply:
 disposable-PR re-validation of the guard is required.
 
 Until then the guard stays **RED**, which is the correct state.
+
+## Temporary SDK fork dependency (tracks Free-Ink/freeink-sdk PR #65)
+
+`.gitmodules` points `freeink-sdk` at **`https://github.com/sfoulad/freeink-sdk.git`**
+instead of `Free-Ink/freeink-sdk`. This is a fetchability workaround, not a
+divergence in SDK content, and it is **temporary**.
+
+    pinned gitlink   c4906def5a3f46456b743d55defc87de054fa226
+                   = e30d25a0 (upstream 1.6.5rc's own pin) + exactly 1 commit
+    fork branch      pin/midad-1.6.5rc-secureclient-peer-verification
+    upstream PR      Free-Ink/freeink-sdk #65 (open)
+
+**Why it was necessary.** The pin had only ever existed in a local submodule
+checkout, so every CI job — builds, cppcheck, CodeQL, clang-format, unit tests
+and the thin-fork guard alike — died at `actions/checkout` with
+`upload-pack: not our ref`. The branch had never had a green CI run; the failure
+predates this merge (head `0d5a9fc7`, 2026-09-16, failed identically on the older
+pin `e693f2bc`). A green local four-board build does not detect this, because the
+submodule is already present on disk.
+
+**Why not just pin upstream's `e30d25a0`.** The extra commit arms
+`wolfSSL_check_domain_name()` on every non-insecure connection and fails closed
+when the CA buffer does not parse. Without it, a `setCACert()` connection accepts
+any certificate signed by any trusted CA **for any hostname**. Dropping it to go
+green would be a real TLS regression.
+
+**Why not pin PR #65's own branch.** Its head (`6d33e9fd`) is based on an SDK
+older than `e30d25a0`, so pinning it would regress the SDK base and contradict
+the directive to adopt upstream's 1.6.5rc pin.
+
+**Exit condition.** Revert the URL to `https://github.com/Free-Ink/freeink-sdk.git`
+as soon as equivalent hostname verification is merged upstream onto a base at or
+after `e30d25a0`, and re-pin to that upstream commit. Until then this fork must
+carry **only** this one commit — it is not a place to accumulate SDK divergence.
