@@ -67,6 +67,9 @@ void drawGoalRing(const GfxRenderer& renderer, int cx, int cy, int outerRadius, 
   // SAME thickness as the black progress arc, so progress reads as "filling
   // in" the ring rather than a thin needle floating over a hairline circle.
   constexpr int kThickness = 7;
+  // Radians -> degrees as a float constant: deriving it from M_PI (a double)
+  // and narrowing costs precision for no benefit at this scale.
+  constexpr float kRadToDeg = 57.295779513082321f;
   const int innerRadius = std::max(outerRadius - kThickness, 0);
   const int outerSq = outerRadius * outerRadius;
   const int innerSq = innerRadius * innerRadius;
@@ -78,7 +81,7 @@ void drawGoalRing(const GfxRenderer& renderer, int cx, int cy, int outerRadius, 
       if (distSq > outerSq || distSq < innerSq) continue;
       const int px = cx + dx;
       const int py = cy + dy;
-      float angleDeg = std::atan2(static_cast<float>(dx), static_cast<float>(-dy)) * static_cast<float>(180.0 / M_PI);
+      float angleDeg = std::atan2(static_cast<float>(dx), static_cast<float>(-dy)) * kRadToDeg;
       if (angleDeg < 0) angleDeg += 360.0f;
       if (angleDeg <= progressSweepDeg) {
         renderer.drawPixel(px, py, true);
