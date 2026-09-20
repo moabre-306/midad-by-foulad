@@ -163,7 +163,7 @@ void dropKeepAliveVerified() {
 struct Sink {
   std::function<bool(const uint8_t*, size_t)> write;  // returns false to abort the transfer
   HttpDownloader::ProgressCallback progress;
-  bool* cancelFlag = nullptr;
+  const bool* cancelFlag = nullptr;
   size_t total = 0;
   size_t downloaded = 0;
 };
@@ -1660,7 +1660,7 @@ HttpDownloader::DownloadError runPostJson(const std::string& url, const std::str
 HttpDownloader::DownloadError runDownloadRangedVerified(const std::string& url, const std::string& username,
                                                         const std::string& password, const std::string& destPath,
                                                         const HttpDownloader::ProgressCallback& progress,
-                                                        bool* cancelFlag, const char* anchorsPem) {
+                                                        const bool* cancelFlag, const char* anchorsPem) {
   const std::string tmpPath = destPath + ".part";
   Storage.remove(tmpPath.c_str());
 
@@ -1872,7 +1872,7 @@ bool HttpDownloader::fetchUrl(const std::string& url, const DataCallback& onData
 }
 
 HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& url, const std::string& destPath,
-                                                             ProgressCallback progress, bool* cancelFlag,
+                                                             ProgressCallback progress, const bool* cancelFlag,
                                                              const std::string& username, const std::string& password) {
   LOG_DBG("HTTP", "Downloading: %s -> %s", url.c_str(), destPath.c_str());
 

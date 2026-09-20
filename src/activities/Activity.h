@@ -45,7 +45,7 @@ class Activity {
   // requestUpdateAndWait() call -- see ActivityManager::consumePressesDuringLastWait()'s own
   // comment. For activities (e.g. games) that need to stay responsive across a blocking
   // render wait; check in addition to normal wasPressed()/onPress() handling, not instead of.
-  uint8_t consumePressesDuringLastWait() { return activityManager.consumePressesDuringLastWait(); }
+  static uint8_t consumePressesDuringLastWait() { return activityManager.consumePressesDuringLastWait(); }
 
   virtual bool skipLoopDelay() { return false; }
   virtual bool preventAutoSleep() { return false; }

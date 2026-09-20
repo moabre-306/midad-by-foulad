@@ -78,7 +78,7 @@ void drawGoalRing(const GfxRenderer& renderer, int cx, int cy, int outerRadius, 
       if (distSq > outerSq || distSq < innerSq) continue;
       const int px = cx + dx;
       const int py = cy + dy;
-      float angleDeg = std::atan2(static_cast<float>(dx), static_cast<float>(-dy)) * 180.0f / static_cast<float>(M_PI);
+      float angleDeg = std::atan2(static_cast<float>(dx), static_cast<float>(-dy)) * static_cast<float>(180.0 / M_PI);
       if (angleDeg < 0) angleDeg += 360.0f;
       if (angleDeg <= progressSweepDeg) {
         renderer.drawPixel(px, py, true);

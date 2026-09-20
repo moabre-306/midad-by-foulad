@@ -244,6 +244,7 @@ OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
     return HTTP_ERROR;
   }
 
+  // cppcheck-suppress knownConditionTrueFalse // deliberately unreachable, see below
   if (conditional.notModified) {
     LOG_DBG("OTA", "Release list unchanged (304), using cached result: tag=%s", cache.tag.c_str());
     latestVersion = cache.tag;

@@ -1,9 +1,19 @@
 # TEMPORARY FORK DEPENDENCY -- tracks Free-Ink/freeink-sdk PR #65.
 #
 # The pinned commit (c4906def) is upstream's own 1.6.5rc pin e30d25a0 plus one
-# commit that arms wolfSSL_check_domain_name() on every non-insecure connection
-# and fails closed when the CA buffer does not parse. Without it a setCACert()
-# connection accepts any certificate signed by any trusted CA for ANY hostname.
+# commit. That commit makes THREE changes, not just the hostname check:
+#   1. arms wolfSSL_check_domain_name() on every non-insecure connection --
+#      without it a setCACert() connection accepts any certificate signed by
+#      any trusted CA for ANY hostname;
+#   2. fails the connect closed when the CA buffer does not parse, instead of
+#      handshaking against an empty trust store;
+#   3. SecureHttpClient treats 1xx/204/304 as carrying no body (RFC 9110
+#      s6.4.1). Currently latent in this firmware: runGetWolf is the only
+#      SecureHttpClient path and its sole caller (OtaUpdater's pinned GitHub
+#      metadata fetch) sends no If-None-Match, so no such status arrives today.
+#      It removes a stall hazard -- a no-body response with no framing headers
+#      would otherwise sit in readUntilClose() until the timeout -- and is a
+#      prerequisite for ever re-enabling conditional GETs on that transport.
 #
 # That fix is submitted upstream as Free-Ink/freeink-sdk PR #65 (open). Upstream
 # has no commit carrying it on an acceptable base -- the PR's own branch sits on

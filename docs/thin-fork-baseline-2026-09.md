@@ -172,11 +172,36 @@ predates this merge (head `0d5a9fc7`, 2026-09-16, failed identically on the olde
 pin `e693f2bc`). A green local four-board build does not detect this, because the
 submodule is already present on disk.
 
-**Why not just pin upstream's `e30d25a0`.** The extra commit arms
-`wolfSSL_check_domain_name()` on every non-insecure connection and fails closed
-when the CA buffer does not parse. Without it, a `setCACert()` connection accepts
-any certificate signed by any trusted CA **for any hostname**. Dropping it to go
-green would be a real TLS regression.
+**Why not just pin upstream's `e30d25a0`.** The extra commit is not "the
+hostname-verification fix" alone -- it makes three changes:
+
+1. **Hostname verification.** Arms `wolfSSL_check_domain_name()` on every
+   non-insecure connection. Without it a `setCACert()` connection accepts any
+   certificate signed by any trusted CA **for any hostname**, so a
+   CA-verified connection is still redirectable to any CA-certified attacker
+   host. SNI names the host but does not bind the peer certificate to it.
+2. **Fail-closed CA loading.** `wolfSSL_CTX_load_verify_buffer()` failure now
+   aborts the connect instead of proceeding to a handshake against an empty
+   trust store, whose verify error is indistinguishable from a genuine bad peer.
+3. **RFC 9110 s6.4.1 no-body statuses.** `SecureHttpClient` stops reading a body
+   for 1xx/204/304 regardless of the `Content-Length`/`Transfer-Encoding` those
+   responses echo.
+
+Dropping the pin would be a real TLS regression on (1) and (2).
+
+**Coverage of (3), stated honestly: it is latent in this firmware today.**
+`runGetWolf` is the only `SecureHttpClient`-backed path, and its only caller is
+`OtaUpdater`'s pinned GitHub release-metadata fetch, which deliberately sends no
+`If-None-Match` (the conditional/ETag path is abandoned on that transport --
+see the comment at `OtaUpdater.cpp`). The one firmware path that does expect a
+204, `runDelete`, runs on `esp_http_client`, not the SDK client. So no current
+request can receive a no-body status over the changed code. It is carried
+because it removes a real stall hazard -- such a response with no framing
+headers would otherwise fall into `readUntilClose()` and hang a kept-alive
+connection until the timeout -- and because it is a prerequisite for ever
+re-enabling conditional GETs on the pinned transport. There is no host test for
+it: the SDK ships no test suite, and the behaviour is not reachable from this
+firmware's own paths.
 
 **Why not pin PR #65's own branch.** Its head (`6d33e9fd`) is based on an SDK
 older than `e30d25a0`, so pinning it would regress the SDK base and contradict

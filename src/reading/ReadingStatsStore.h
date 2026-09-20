@@ -100,7 +100,7 @@ class ReadingStatsStore {
   size_t findBookIndex(const std::string& path) const;
   // Find-or-create at index 0 (moves an existing entry to the front).
   void touchBook(const std::string& path, const std::string& title, const std::string& author);
-  void addDayMs(std::vector<ReadingDayStats>& days, uint32_t dayOrdinal, uint32_t ms, size_t maxDays);
+  static void addDayMs(std::vector<ReadingDayStats>& days, uint32_t dayOrdinal, uint32_t ms, size_t maxDays);
   void rebuildAggregatedDays();
   void updateStreaksAfterWrite();
   void saveDeferred();
