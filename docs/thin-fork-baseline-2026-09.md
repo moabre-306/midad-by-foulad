@@ -110,3 +110,45 @@ Defects this merge found and fixed, rather than carried forward:
 - OTA asset naming: the release workflows publish `crosspoint-<version>-<device>.bin`
   while the firmware still searched `firmware.bin`. All three publishing workflows
   and `OtaUpdater` now agree, including the leading-`v` strip Midad's tags need.
+
+## Security-boundary verification — `.github/workflows/ci.yml` (1.6.5rc merge)
+
+The 1.6.5rc merge carries one upstream change into a `SECURITY_BOUNDARY_FILES`
+path, so `scripts/thin-fork-guard.sh` fails this PR by design. The guard was
+**not** weakened, bypassed, or given an allowlist entry. What the delta is,
+verified structurally rather than by eye:
+
+    ours     0d5a9fc7
+    merged   a940f489
+    delta    .github/workflows/ci.yml, +4 / -3
+
+1. A comment correction. The old text claimed PR artifact names match the
+   release asset names OtaUpdater requests — no longer true now that releases
+   publish `crosspoint-<version>-<device>.bin`. The new text says the artifact
+   names are for PR identification only.
+2. One matrix entry added to the `build` job: `{env: x4c, asset: firmware-x4c.bin}`.
+
+Parsed both revisions and compared structurally:
+
+| Property | Result |
+| --- | --- |
+| `on:` (triggers) | identical |
+| top-level `permissions:` | identical |
+| job list | identical (7 jobs) |
+| every job's `steps`, `if`, `needs`, `permissions` | identical |
+| whole file with the `build` matrix excluded | **byte-identical** |
+| `test-status` (the required check) | untouched |
+
+No trigger, permission, gate condition, required-check name, or enforcement path
+changed. The one behavioural effect is **stricter**, not weaker: `build` now has
+to compile a fifth board (`x4c`) before it can go green.
+
+Procedure status: this is `docs/upstream-sync-architecture.md`'s
+"Security-boundary file maintenance" case. Step 1 (classify) and the verification
+above are done. **Steps 2-4 — the admin temporarily relaxing
+`thin-fork-guard-trusted` in the ruleset, merging, and immediately restoring it —
+remain outstanding and are the repo owner's to perform.** Step 5 does not apply:
+`ci.yml` is the CI entrypoint, not the trusted evaluator's own logic, so no
+disposable-PR re-validation of the guard is required.
+
+Until then the guard stays **RED**, which is the correct state.
