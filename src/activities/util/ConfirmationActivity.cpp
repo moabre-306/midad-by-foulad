@@ -12,25 +12,11 @@ ConfirmationActivity::ConfirmationActivity(GfxRenderer& renderer, MappedInputMan
 void ConfirmationActivity::onEnter() {
   Activity::onEnter();
 
-  lineHeight = renderer.getLineHeight(fontId);
-  const int maxWidth = renderer.getScreenWidth() - (margin * 2);
-
-  // Wrapped, not truncated: these are whole sentences asking the user to decide
-  // something, and "Log out of Midad? You'll need to sign in ..." cut at the screen
-  // edge is exactly the half that does not tell them what happens.
-  safeHeading = heading;
-  safeBody = body;
-
-  // Text sits in the upper part of the screen so the confirmation popup
-  // (centered) doesn't cover it.
-  startY = renderer.getScreenHeight() / 6;
-
-  // No title on the popup: the question is already on screen above it, wrapped and
-  // in full. Passing it here as well drew it twice -- once truncated behind, once
-  // unwrapped inside a dialog whose width is clamped to the screen, so it spilled
-  // out of both edges of the box.
+  // Both texts live inside the dialog: the heading as its caption and the
+  // subject (a book title) as the wrapping headline beneath it. No
+  // pre-truncation — the dialog wraps both to its own width.
   const char* options[] = {I18N.get(StrId::STR_CANCEL), I18N.get(StrId::STR_CONFIRM)};
-  confirmPopup.show("", options, 2, 0, [this](int idx) {
+  confirmPopup.show(heading.c_str(), body.c_str(), options, 2, 0, [this](int idx) {
     ActivityResult res;
     res.isCancelled = (idx != 1);
     setResult(std::move(res));
@@ -42,18 +28,6 @@ void ConfirmationActivity::onEnter() {
 
 void ConfirmationActivity::render(RenderLock&& lock) {
   renderer.clearScreen();
-
-  const int maxWidth = renderer.getScreenWidth() - (margin * 2);
-  int currentY = startY;
-  if (!safeHeading.empty()) {
-    currentY +=
-        renderer.drawCenteredTextWrapped(fontId, currentY, maxWidth, safeHeading.c_str(), 4, true, EpdFontFamily::BOLD);
-    currentY += spacing;
-  }
-
-  if (!safeBody.empty()) {
-    renderer.drawCenteredTextWrapped(fontId, currentY, maxWidth, safeBody.c_str(), 4, true, EpdFontFamily::REGULAR);
-  }
 
   if (confirmPopup.processRender(renderer, mappedInput)) return;
 

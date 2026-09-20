@@ -33,7 +33,10 @@ enum class HomeMenuItem {
   SETTINGS_MENU,
   CHECK_UPDATE,
   STATS,
-  APPS
+  APPS,
+  // Appended rather than slotted in at upstream's position: the values above are
+  // relied on by saved state, so none of them may shift.
+  LIBRARY
 };
 
 /**
@@ -148,6 +151,7 @@ class ActivityManager {
   void goToFileBrowser(std::string path = {});
   void goToRecentBooks();
   void goToApps();
+  void goToLibrary();
   void goToBrowser();
   void goToFouladEbooks();
   // Apps -> News: the OPDS browser rooted at the account's feed subscriptions.

@@ -74,3 +74,39 @@ both need a repo admin — neither can be done from a working tree:
    admin relaxes the required check, merges, restores immediately.
 
 Recording the decision does not substitute for either step.
+
+## Addendum — CrossPoint 1.6.5rc merge
+
+    upstream merged     a1ceb6333f907856e4dcde21bd0a94f5be84452b (1.6.5rc)
+    merge base          7db14a015ca4b1d74d3cbed131a748f3029a4517
+
+Divergences **deliberately kept** in this merge. Each was reached by reading both
+sides, not by taking a whole file from one of them; a future sync should not
+re-open them without a product decision.
+
+| Area | Kept | Why |
+| --- | --- | --- |
+| `RecentBooksActivity.{h,cpp}` | ours (upstream deleted it) | Midad's Home hero/recents row. Five dependents: `HomeActivity`, `ActivityManager`, `GridNav`, `QuranBook`, `GymCatalog`. |
+| `OpdsBookBrowserActivity.cpp` | ours | Midad renders the catalogue as a direct cover grid via `render(RenderLock&&)`; upstream moved to declarative `UiScreen` builders this fork's header does not declare. |
+| `HomeActivity` tile list | ours | Midad's Home is four tiles (Foulad eBooks, Stats, Apps, Settings). `menuItemToIndex`/`indexToMenuItem` must stay mutual inverses of that list. |
+| `SettingInfo` location | ours (`SettingsTypes.h`) | This fork extracted it; upstream still defines it inside `SettingsActivity.h`. Taking upstream's copy would be a redefinition. Upstream's two new `SettingAction` values were ported across. |
+| `uiTheme` settings row | absent | Single-theme firmware (`uiTheme = FOULAD`). |
+| `main.cpp` idle loop | ours | BLE-aware light sleep; upstream's simpler loop cannot express the BLE RF-floor guard, and the code after it reads `blePreventsLowPower`/`idleMs`. |
+| `test/minibidi_arabic` | not carried | Asserts `BidiUtils` emits Arabic presentation forms. This fork shapes at draw time in `lib/ArabicShaper`; `test/arabic_shaper` covers the same forms in the right architecture. |
+| `PngToBmpConverter` internal | both parameters | Both sides added a 7th positional `bool`. `allowUpscale` keeps position 7 so existing callers bind unchanged; upstream's `originalThresholds` is appended at 8. |
+
+Defects this merge found and fixed, rather than carried forward:
+
+- `EpdFont::getLigature` was missing upstream's #3294 guard, so the font's
+  Lam-Alef pairs re-collapsed already-shaped Arabic presentation forms and
+  transposed letters. `test/ligature_guard` existed but was never registered.
+- `SdCardFont`'s underuse hysteresis ended up evaluated **twice** (both sides had
+  moved it, to different functions), retiring font buffers a scope early.
+  Upstream's cache-miss placement is the one kept.
+- `SdCardFont`'s arena retry (`PREWARM_ARENA_TOO_LARGE`, `measuredBytesPerGlyph`)
+  had been dropped by the earlier 1.6.22 merge (`1a8fb18c`) and is restored.
+- `KeyboardLayoutsActivity` compiled but was unreachable: its settings row and
+  dispatch case were lost.
+- OTA asset naming: the release workflows publish `crosspoint-<version>-<device>.bin`
+  while the firmware still searched `firmware.bin`. All three publishing workflows
+  and `OtaUpdater` now agree, including the leading-`v` strip Midad's tags need.

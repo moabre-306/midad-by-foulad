@@ -340,6 +340,7 @@ STR_MENU_RECENT_BOOKS: "کتاب‌های اخیر"
 STR_REMOVE_FROM_RECENTS: "از کتاب‌های اخیر حذف شود؟"
 STR_NO_RECENT_BOOKS: "کتاب اخیری نیست"
 STR_CALIBRE_DESC: "استفاده از انتقال بی‌سیم دستگاه کالیبر"
+
 STR_FORGET_AND_REMOVE: "شبکه فراموش و رمز ذخیره‌شده حذف شود؟"
 STR_FORGET_BUTTON: "فراموش کردن"
 STR_CALIBRE_STARTING: "در حال راه‌اندازی کالیبر..."

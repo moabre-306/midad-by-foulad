@@ -25,6 +25,13 @@ class HttpDownloader {
     ABORTED,
   };
 
+  // Pre-flight floor for starting a TLS transfer. Below this the session or
+  // its ~17KB record buffer fails mid-stream (wolfSSL MEMORY_E) -- or an
+  // interior allocation abort()s the device. Callers should check before
+  // downloadToFile() and fail into their error UI instead.
+  static constexpr uint32_t MIN_TLS_FREE_HEAP = 40000;
+  static constexpr uint32_t MIN_TLS_MAX_ALLOC = 20000;
+
   // Which stage of the last failed request produced its HTTP_ERROR/FILE_ERROR,
   // plus a stage-specific detail code -- lets a caller-facing diagnostic (e.g. the
   // OTA "Update Failed" screen) show what actually went wrong (DNS/connect/TLS vs.

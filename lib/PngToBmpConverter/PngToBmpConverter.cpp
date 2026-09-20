@@ -423,7 +423,8 @@ static void convertScanlineToGray(const PngDecodeContext& ctx, uint8_t* grayRow)
 }
 
 bool PngToBmpConverter::pngFileToBmpStreamInternal(HalFile& pngFile, Print& bmpOut, int targetWidth, int targetHeight,
-                                                   bool oneBit, bool crop, bool allowUpscale) {
+                                                   bool oneBit, bool crop, bool allowUpscale,
+                                                   bool originalThresholds) {
   LOG_DBG("PNG", "Converting PNG to %s BMP (target: %dx%d)", oneBit ? "1-bit" : "2-bit", targetWidth, targetHeight);
 
   // Verify PNG signature
@@ -706,18 +707,15 @@ bool PngToBmpConverter::pngFileToBmpStreamInternal(HalFile& pngFile, Print& bmpO
     return false;
   }
 
-  // Create ditherers (same as JpegToBmpConverter). Both the outer object and its internal
-  // error-row buffers (see BitmapHelpers.h) must be nothrow + null-checked: with
-  // -fno-exceptions a bare `new` that fails calls abort() instead of returning nullptr.
-  AtkinsonDitherer* atkinsonDitherer = nullptr;
-  FloydSteinbergDitherer* fsDitherer = nullptr;
-  Atkinson1BitDitherer* atkinson1BitDitherer = nullptr;
+  // Create ditherers (same as JpegToBmpConverter)
+  std::unique_ptr<AtkinsonDitherer> atkinsonDitherer;
+  std::unique_ptr<FloydSteinbergDitherer> fsDitherer;
+  std::unique_ptr<Atkinson1BitDitherer> atkinson1BitDitherer;
 
   if (oneBit) {
-    atkinson1BitDitherer = new (std::nothrow) Atkinson1BitDitherer(outWidth);
-    if (!atkinson1BitDitherer || !atkinson1BitDitherer->ok()) {
-      LOG_ERR("PNG", "OOM: Atkinson1BitDitherer");
-      delete atkinson1BitDitherer;
+    atkinson1BitDitherer = makeUniqueNoThrow<Atkinson1BitDitherer>(outWidth);
+    if (!atkinson1BitDitherer || !atkinson1BitDitherer->isValid()) {
+      LOG_ERR("PNG", "OOM: Atkinson1BitDitherer or row buffers");
       free(rowBuffer);
       free(ctx.currentRow);
       free(ctx.previousRow);
@@ -725,20 +723,18 @@ bool PngToBmpConverter::pngFileToBmpStreamInternal(HalFile& pngFile, Print& bmpO
     }
   } else if (!USE_8BIT_OUTPUT) {
     if (USE_ATKINSON) {
-      atkinsonDitherer = new (std::nothrow) AtkinsonDitherer(outWidth);
-      if (!atkinsonDitherer || !atkinsonDitherer->ok()) {
-        LOG_ERR("PNG", "OOM: AtkinsonDitherer");
-        delete atkinsonDitherer;
+      atkinsonDitherer = makeUniqueNoThrow<AtkinsonDitherer>(outWidth, originalThresholds);
+      if (!atkinsonDitherer || !atkinsonDitherer->isValid()) {
+        LOG_ERR("PNG", "OOM: AtkinsonDitherer or row buffers");
         free(rowBuffer);
         free(ctx.currentRow);
         free(ctx.previousRow);
         return false;
       }
     } else if (USE_FLOYD_STEINBERG) {
-      fsDitherer = new (std::nothrow) FloydSteinbergDitherer(outWidth);
-      if (!fsDitherer || !fsDitherer->ok()) {
-        LOG_ERR("PNG", "OOM: FloydSteinbergDitherer");
-        delete fsDitherer;
+      fsDitherer = makeUniqueNoThrow<FloydSteinbergDitherer>(outWidth, originalThresholds);
+      if (!fsDitherer || !fsDitherer->isValid()) {
+        LOG_ERR("PNG", "OOM: FloydSteinbergDitherer or row buffers");
         free(rowBuffer);
         free(ctx.currentRow);
         free(ctx.previousRow);
@@ -760,9 +756,6 @@ bool PngToBmpConverter::pngFileToBmpStreamInternal(HalFile& pngFile, Print& bmpO
       LOG_ERR("PNG", "OOM: scaling accumulators");
       delete[] rowAccum;
       delete[] rowCount;
-      delete atkinsonDitherer;
-      delete fsDitherer;
-      delete atkinson1BitDitherer;
       free(rowBuffer);
       free(ctx.currentRow);
       free(ctx.previousRow);
@@ -778,9 +771,6 @@ bool PngToBmpConverter::pngFileToBmpStreamInternal(HalFile& pngFile, Print& bmpO
     LOG_ERR("PNG", "Failed to allocate grayscale row buffer");
     delete[] rowAccum;
     delete[] rowCount;
-    delete atkinsonDitherer;
-    delete fsDitherer;
-    delete atkinson1BitDitherer;
     free(rowBuffer);
     free(ctx.currentRow);
     free(ctx.previousRow);
@@ -939,9 +929,6 @@ bool PngToBmpConverter::pngFileToBmpStreamInternal(HalFile& pngFile, Print& bmpO
   free(grayRow);
   delete[] rowAccum;
   delete[] rowCount;
-  delete atkinsonDitherer;
-  delete fsDitherer;
-  delete atkinson1BitDitherer;
   free(rowBuffer);
   free(ctx.currentRow);
   free(ctx.previousRow);
@@ -952,11 +939,12 @@ bool PngToBmpConverter::pngFileToBmpStreamInternal(HalFile& pngFile, Print& bmpO
   return success;
 }
 
-bool PngToBmpConverter::pngFileToBmpStream(HalFile& pngFile, Print& bmpOut, bool crop) {
+bool PngToBmpConverter::pngFileToBmpStream(HalFile& pngFile, Print& bmpOut, bool crop, bool originalThresholds) {
   // Use runtime display dimensions (swapped for portrait cover sizing)
   const int targetWidth = display.getDisplayHeight();
   const int targetHeight = display.getDisplayWidth();
-  return pngFileToBmpStreamInternal(pngFile, bmpOut, targetWidth, targetHeight, false, crop);
+  return pngFileToBmpStreamInternal(pngFile, bmpOut, targetWidth, targetHeight, false, crop,
+                                    /*allowUpscale=*/true, originalThresholds);
 }
 
 bool PngToBmpConverter::pngFileToBmpStreamWithSize(HalFile& pngFile, Print& bmpOut, int targetMaxWidth,

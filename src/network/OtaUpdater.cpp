@@ -193,17 +193,36 @@ OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
   if (cache.usable()) conditional.ifNoneMatch = cache.etag;
 
   ReleaseJsonParser releaseParser;
-  // Each board updates from its own release asset: plain firmware.bin for the
-  // C3 X4/X3 binary (pre-existing releases), firmware-<board>.bin otherwise.
+  releaseParser.setFirmwareAssetName("");
+  // Each board updates from crosspoint-<version>-<device>.bin. The combined
+  // C3 image uses x3-x4; other asset suffixes match their firmware board tag.
   const bool isX4 = board_tag::boardNameLen() == 2 && memcmp(board_tag::boardName(), "x4", 2) == 0;
-  char assetName[48] = "firmware.bin";
+  char assetSuffix[20] = "-x3-x4";
   if (!isX4) {
-    snprintf(assetName, sizeof(assetName), "firmware-%.*s.bin", static_cast<int>(board_tag::boardNameLen()),
+    snprintf(assetSuffix, sizeof(assetSuffix), "-%.*s", static_cast<int>(board_tag::boardNameLen()),
              board_tag::boardName());
   }
-  releaseParser.setFirmwareAssetName(assetName);
-  auto feed = [&releaseParser](const uint8_t* data, size_t len) {
-    releaseParser.feed(reinterpret_cast<const char*>(data), len);
+  // Asset name is only knowable once tag_name has been seen, so the body is fed
+  // one byte at a time until then, and in bulk afterwards.
+  char assetName[48] = {};
+  bool assetNameSet = false;
+  auto feed = [&](const uint8_t* data, size_t len) {
+    size_t offset = 0;
+    while (!assetNameSet && offset < len) {
+      releaseParser.feed(reinterpret_cast<const char*>(data + offset), 1);
+      offset++;
+      if (releaseParser.foundTag()) {
+        // Assets are named from the version, not the tag: the release workflow
+        // writes crosspoint-${TAG#v}-<device>.bin, so a "v" prefix must be dropped
+        // here too. No-op for tags that already start with a digit.
+        const char* version = releaseParser.getTagName();
+        if (*version == 'v') ++version;
+        snprintf(assetName, sizeof(assetName), "crosspoint-%s%s.bin", version, assetSuffix);
+        releaseParser.setFirmwareAssetName(assetName);
+        assetNameSet = true;
+      }
+    }
+    if (offset < len) releaseParser.feed(reinterpret_cast<const char*>(data + offset), len - offset);
     return true;
   };
 

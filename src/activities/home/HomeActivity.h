@@ -3,6 +3,7 @@
 #include <functional>
 #include <vector>
 
+#include "./FileBrowserActivity.h"
 #include "RecentBooksStore.h"
 #include "activities/Activity.h"
 #include "util/ButtonNavigator.h"
@@ -104,6 +105,8 @@ class HomeActivity final : public Activity {
   void onSelectBook(const std::string& path);
   void onRecentsOpen();
   void onStatsOpen();
+  void onFileBrowserOpen();
+  void onLibraryOpen();
   void onSettingsOpen();
   void onFouladEbooksOpen();
 

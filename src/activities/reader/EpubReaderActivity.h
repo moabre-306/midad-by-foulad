@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "BookmarkEntry.h"
+#include "ChapterPosition.h"
 #include "EpubReaderMenuActivity.h"
 #include "ProgressMapper.h"
 #include "ReaderActivity.h"
@@ -194,6 +195,10 @@ class EpubReaderActivity final : public ReaderActivity {
   // edits). The toolbar's More panel dispatches leaf actions with no payload,
   // so it defaults -- every case that reads `menu` is filtered out there.
   void onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction action, const MenuResult& menu = MenuResult{});
+  // Live section position, or the values cached before a child screen
+  // released the section.
+  ChapterPosition chapterPosition() const;
+  int bookPercentFor(const ChapterPosition& position) const;
   // Reloads the current page fresh from the section (mirrors the loadPage()
   // call in render()) as a shared_ptr for DictionaryWordSelectActivity /
   // DictionaryHistoryActivity, which outlive the menu-confirm call. Also

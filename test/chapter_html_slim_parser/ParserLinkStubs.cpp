@@ -44,12 +44,8 @@ bool ImageToFramebufferDecoder::validateAndStoreDimensions(int64_t, int64_t, Ima
   return false;
 }
 
-void PageLine::render(GfxRenderer&, int, int, int) {}
-bool PageLine::serialize(HalFile&) { return false; }
-
-void PageImage::render(GfxRenderer&, int, int, int) {}
-void PageImage::renderPlaceholder(GfxRenderer&, int, int) const {}
-bool PageImage::serialize(HalFile&) { return false; }
-
-void PageHorizontalRule::render(GfxRenderer&, int, int, int) {}
-bool PageHorizontalRule::serialize(HalFile&) { return false; }
+void ImageBlock::render(GfxRenderer&, int, int) {}
+void ImageBlock::renderPlaceholder(GfxRenderer&, int, int) const {}
+bool ImageBlock::needsDecode() const { return false; }
+bool ImageBlock::serialize(HalFile&) { return false; }
+std::unique_ptr<ImageBlock> ImageBlock::deserialize(HalFile&) { return nullptr; }

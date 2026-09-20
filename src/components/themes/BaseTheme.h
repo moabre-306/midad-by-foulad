@@ -158,6 +158,7 @@ enum UIIcon {
   Hotspot,
   Bookmark,
   Usb,
+  Blocks,
   // Midad-only, appended after upstream's last value so the shared prefix
   // keeps upstream's ordering. UIIcon is never persisted.
   Stats,

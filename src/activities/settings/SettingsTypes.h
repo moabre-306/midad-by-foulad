@@ -37,11 +37,13 @@ enum class SettingAction {
   OPDSBrowser,
   Network,
   ClearCache,
+  RebuildLibraryIndex,
   CheckForUpdates,
   SdFirmwareUpdate,
   Language,
   DownloadFonts,
   TextSettings,
+  KeyboardLayouts,
   // Dispatches to SettingInfo::actionHandler instead of a case below, so an
   // integration can contribute action rows without adding a value here.
   Extension,

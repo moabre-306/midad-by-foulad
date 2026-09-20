@@ -177,15 +177,28 @@ jobs:
             .pio/build/gh_release_rc/firmware.map
             .pio/build/gh_release_rc/partitions.bin
 
+      - name: Name release asset
+        # Must match the tag below exactly (tag minus its leading "v"), because
+        # OtaUpdater derives the asset name from tag_name -- see release.yml.
+        # Only the combined C3 image is built here, so only x3-x4 is published;
+        # other boards simply find no matching asset on this channel.
+        env:
+          NEXT: ${{ steps.version.outputs.next }}
+          SHORT_SHA: ${{ steps.version.outputs.short_sha }}
+        run: |
+          asset="crosspoint-${NEXT}-rc+${SHORT_SHA}-x3-x4.bin"
+          cp ".pio/build/gh_release_rc/firmware.bin" ".pio/build/gh_release_rc/${asset}"
+          echo "RC_ASSET=${asset}" >> "$GITHUB_ENV"
+
       - name: Publish GitHub Pre-release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
         with:
-          # firmware.bin only, matching release.yml, so ReleaseJsonParser and
-          # OtaUpdater need no per-channel special-casing. Devices with
+          # One asset only, matching release.yml's naming, so ReleaseJsonParser
+          # and OtaUpdater need no per-channel special-casing. Devices with
           # Settings -> System -> Pre-release enabled check the full /releases
           # list and will see this; everyone else stays on /releases/latest,
           # which GitHub documents as excluding pre-releases.
           tag_name: ${{ steps.version.outputs.tag }}
           prerelease: true
           generate_release_notes: true
-          files: .pio/build/gh_release_rc/firmware.bin
+          files: .pio/build/gh_release_rc/${{ env.RC_ASSET }}
