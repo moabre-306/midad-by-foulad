@@ -3,6 +3,12 @@ name: Compile Release Candidate
 on:
   workflow_dispatch:
 
+env:
+  # Pins the core that the platform installs into its own penv at build time.
+  # See scripts/uv-constraints.txt -- without it the firmware is built by an
+  # unpinned PyPI core fetched after the integrity check has already passed.
+  UV_CONSTRAINT: ${{ github.workspace }}/scripts/uv-constraints.txt
+
 jobs:
   build-release-candidate:
     if: startsWith(github.ref_name, 'release/')
@@ -47,8 +53,11 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.platformio
-          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
-          restore-keys: pio-${{ runner.os }}-
+          # Every input that decides which packages get installed is in the key, and
+          # there is deliberately no restore-keys: a partial match would layer a new
+          # platform/core over packages resolved for an older one, which is how a
+          # mid-build core migration (and an unverified scons) got in.
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini', 'scripts/requirements-ci.lock', 'scripts/platformio-packages-lock.json', 'scripts/uv-constraints.txt') }}
 
       - name: Verify PlatformIO package integrity
         # See release.yml's identical step -- issue #179.
