@@ -68,7 +68,12 @@ class KOReaderSyncClient {
     JSON_ERROR,
     NOT_FOUND,
     LOW_MEMORY,
-    USER_EXISTS
+    USER_EXISTS,
+    // Configured server is a Midad origin, which does not implement this
+    // protocol (see KOReaderCredentialStore::targetsMidadOrigin). Distinct from
+    // NETWORK_ERROR so the UI can say "unavailable" instead of implying a
+    // transient failure, and so nothing retries it.
+    MIDAD_ORIGIN_UNSUPPORTED
   };
 
   /**

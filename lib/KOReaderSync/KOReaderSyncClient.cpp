@@ -56,6 +56,15 @@ void KOReaderSyncClient::setDeviceIdentity(const std::string& deviceId, const st
 
 KOReaderSyncClient::Error KOReaderSyncClient::authenticate() {
   lastHttpCode = 0;
+  // Refused before any credential is assembled or any socket opened: Midad does
+  // not implement this protocol, and this client would otherwise send the
+  // username and an unsalted MD5 of the password over an unverified connection.
+  // Stored configuration is deliberately left untouched -- this reports
+  // unavailable, it does not sign the user out.
+  if (KOREADER_STORE.targetsMidadOrigin()) {
+    LOG_ERR("KOSync", "refusing: Midad origin does not serve KOSync (use /resume/v1 on api.midad.one)");
+    return MIDAD_ORIGIN_UNSUPPORTED;
+  }
   if (!KOREADER_STORE.hasCredentials()) {
     LOG_DBG("KOSync", "No credentials configured");
     return NO_CREDENTIALS;
@@ -89,6 +98,15 @@ KOReaderSyncClient::Error KOReaderSyncClient::authenticate() {
 
 KOReaderSyncClient::Error KOReaderSyncClient::createUser() {
   lastHttpCode = 0;
+  // Refused before any credential is assembled or any socket opened: Midad does
+  // not implement this protocol, and this client would otherwise send the
+  // username and an unsalted MD5 of the password over an unverified connection.
+  // Stored configuration is deliberately left untouched -- this reports
+  // unavailable, it does not sign the user out.
+  if (KOREADER_STORE.targetsMidadOrigin()) {
+    LOG_ERR("KOSync", "refusing: Midad origin does not serve KOSync (use /resume/v1 on api.midad.one)");
+    return MIDAD_ORIGIN_UNSUPPORTED;
+  }
   if (!KOREADER_STORE.hasCredentials()) {
     LOG_DBG("KOSync", "No credentials configured");
     return NO_CREDENTIALS;
@@ -127,6 +145,15 @@ KOReaderSyncClient::Error KOReaderSyncClient::createUser() {
 KOReaderSyncClient::Error KOReaderSyncClient::getProgress(const std::string& documentHash,
                                                           KOReaderProgress& outProgress) {
   lastHttpCode = 0;
+  // Refused before any credential is assembled or any socket opened: Midad does
+  // not implement this protocol, and this client would otherwise send the
+  // username and an unsalted MD5 of the password over an unverified connection.
+  // Stored configuration is deliberately left untouched -- this reports
+  // unavailable, it does not sign the user out.
+  if (KOREADER_STORE.targetsMidadOrigin()) {
+    LOG_ERR("KOSync", "refusing: Midad origin does not serve KOSync (use /resume/v1 on api.midad.one)");
+    return MIDAD_ORIGIN_UNSUPPORTED;
+  }
   if (!KOREADER_STORE.hasCredentials()) {
     LOG_DBG("KOSync", "No credentials configured");
     return NO_CREDENTIALS;
@@ -210,6 +237,15 @@ KOReaderSyncClient::Error KOReaderSyncClient::getProgress(const std::string& doc
 
 KOReaderSyncClient::Error KOReaderSyncClient::updateProgress(const KOReaderProgress& progress) {
   lastHttpCode = 0;
+  // Refused before any credential is assembled or any socket opened: Midad does
+  // not implement this protocol, and this client would otherwise send the
+  // username and an unsalted MD5 of the password over an unverified connection.
+  // Stored configuration is deliberately left untouched -- this reports
+  // unavailable, it does not sign the user out.
+  if (KOREADER_STORE.targetsMidadOrigin()) {
+    LOG_ERR("KOSync", "refusing: Midad origin does not serve KOSync (use /resume/v1 on api.midad.one)");
+    return MIDAD_ORIGIN_UNSUPPORTED;
+  }
   if (!KOREADER_STORE.hasCredentials()) {
     LOG_DBG("KOSync", "No credentials configured");
     return NO_CREDENTIALS;
@@ -276,6 +312,8 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateProgress(const KOReaderProgr
 
 const char* KOReaderSyncClient::errorString(Error error) {
   switch (error) {
+    case MIDAD_ORIGIN_UNSUPPORTED:
+      return "Sync is not available for Midad accounts on this server";
     case OK:
       return "Success";
     case NO_CREDENTIALS:

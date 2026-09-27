@@ -439,7 +439,9 @@ void EpubReaderActivity::onExit() {
   // for any reason. Gated on pageTurnedThisSession so opening a book and
   // immediately backing out doesn't overwrite a real remote position with
   // nothing.
-  if (epub && pageTurnedThisSession && KOREADER_STORE.hasCredentials()) {
+  // targetsMidadOrigin(): queueing for a server that refuses this protocol would
+  // leave an entry flushPendingKOReaderSync() can never deliver.
+  if (epub && pageTurnedThisSession && KOREADER_STORE.hasCredentials() && !KOREADER_STORE.targetsMidadOrigin()) {
     const CrossPointPosition localPos = getCurrentPosition();
     const SavedProgressPosition localProgress = ProgressMapper::toSavedProgress(epub, localPos);
     const std::string documentHash =
