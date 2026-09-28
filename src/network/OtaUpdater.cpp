@@ -87,7 +87,27 @@ const char* failStageName(const HttpDownloader::FailStage stage) {
 namespace {
 // Excludes pre-releases/drafts -- GitHub's own documented behavior for this
 // endpoint. Used when Settings -> System -> Pre-release is off (the default).
-constexpr char latestReleaseUrl[] = "https://api.github.com/repos/sfoulad/midad-by-foulad/releases/latest";
+// Repository the update channels read from. Overridable ONLY so an isolated
+// hardware OTA test can run against a dedicated test repository instead of the
+// production one -- publishing a test pre-release to production would expose it
+// to every other X4 Pro with pre-release enabled.
+//
+// THE OVERRIDE CHANGES NOTHING BUT THIS STRING. Transport (pinned,
+// hostname-verified fetchUrlPinned), metadata parsing, asset-name resolution,
+// the SHA-256 digest gate and the installation path are the production code in
+// both cases -- that is the point of overriding the repo rather than stubbing
+// the channel.
+//
+// Release builds never define it: the #ifndef below defaults to production, only
+// [env:x4pro-otatest] overrides it, and test/ota_test_repo_guard asserts that no
+// gh_release* environment does. A build that overrides it also carries
+// "-otatest" in CROSSPOINT_VERSION, so a device cannot silently masquerade as a
+// release build in a test report.
+#ifndef CROSSPOINT_OTA_REPO
+#define CROSSPOINT_OTA_REPO "sfoulad/midad-by-foulad"
+#endif
+
+constexpr char latestReleaseUrl[] = "https://api.github.com/repos/" CROSSPOINT_OTA_REPO "/releases/latest";
 // Every release, newest-first, pre-releases included (GitHub does not surface
 // unpublished drafts to an unauthenticated request like this one either way).
 // Used when Settings -> System -> Pre-release is on.
@@ -100,7 +120,7 @@ constexpr char latestReleaseUrl[] = "https://api.github.com/repos/sfoulad/midad-
 // could be thrown away, which is most of the wait between pressing Check for
 // updates and getting an answer. The stable channel never had this:
 // /releases/latest is a single object.
-constexpr char allReleasesUrl[] = "https://api.github.com/repos/sfoulad/midad-by-foulad/releases?per_page=1";
+constexpr char allReleasesUrl[] = "https://api.github.com/repos/" CROSSPOINT_OTA_REPO "/releases?per_page=1";
 
 // Survives the reboot the OTA flow performs on the way in (silentRestartToOtaCheck),
 // which rules out keeping any of this in RAM. Four lines: ETag, then the release the
@@ -171,6 +191,10 @@ void saveCheckCache(bool prerelease, const std::string& etag, const std::string&
 OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
   const bool prerelease = SETTINGS.otaPrereleaseEnabled != 0;
   const char* const url = prerelease ? allReleasesUrl : latestReleaseUrl;
+  if (std::strcmp(CROSSPOINT_OTA_REPO, "sfoulad/midad-by-foulad") != 0) {
+    // Cannot happen in a release build (see CROSSPOINT_OTA_REPO above).
+    LOG_ERR("OTA", "TEST BUILD: update channel is %s, NOT the production repository", CROSSPOINT_OTA_REPO);
+  }
   LOG_DBG("OTA", "Checking for update (current: %s, channel: %s)", CROSSPOINT_VERSION,
           prerelease ? "pre-release" : "stable");
 
