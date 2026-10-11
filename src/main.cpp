@@ -1106,8 +1106,17 @@ void loop() {
         const uint32_t bufferSize = display.getBufferSize();
         logSerial.printf("SCREENSHOT_START:%d\n", bufferSize);
         uint8_t* buf = display.getFrameBuffer();
+#if LOG_SERIAL_HAS_TX_TIMEOUT
+        // The 1 ms log timeout drops everything past the CDC TX buffer; a
+        // screenshot is an explicit host request, so let it block briefly.
+        logSerial.setTxTimeoutMs(200);
+#endif
         logSerial.write(buf, bufferSize);
         logSerial.printf("SCREENSHOT_END\n");
+        logSerial.flush();
+#if LOG_SERIAL_HAS_TX_TIMEOUT
+        logSerial.setTxTimeoutMs(1);
+#endif
         // BLE_STATUS/RESTART: permanent debug tooling alongside SCREENSHOT above,
         // added for inspecting BLE lifecycle state without physical button presses/
         // screen navigation -- same rationale (device-side testing that doesn't need
