@@ -22,3 +22,6 @@ inline std::string_view urlOrigin(std::string_view url) {
   const size_t pathStart = url.find_first_of("/?#", schemeEnd + 3);
   return pathStart == std::string_view::npos ? url : url.substr(0, pathStart);
 }
+
+// urlIsHttps() lives in src/network/HttpVerifiedFetch.h alongside the rest of
+// the verified-fetch preconditions.

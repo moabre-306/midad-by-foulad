@@ -1206,16 +1206,6 @@ void GfxRenderer::drawArabicText(const int fontId, const int x, const int y, con
 
   const int resolvedArabicFontId = resolveArabicFontId(fontId);
   const auto fontIt = fontMap.find(resolvedArabicFontId);
-
-  // Diagnostics only: real-device logs showed the Arabic prewarm scan capturing 0
-  // bytes on every single Quran page turn, with no way to tell whether this function
-  // is even being entered during the scan pass, or entered but bailing out below
-  // before ever reaching recordArabicText(). Counted unconditionally, before the
-  // early return, so it can't itself be skipped by whatever's causing the mismatch.
-  if (fontCacheManager_ && fontCacheManager_->isScanning()) {
-    fontCacheManager_->noteArabicScanEntry(fontIt != fontMap.end(), resolvedArabicFontId);
-  }
-
   if (fontIt == fontMap.end()) {
     // No Arabic font loaded -- nothing we can draw with. Matches the width path above.
     return;
@@ -1258,7 +1248,7 @@ void GfxRenderer::drawArabicText(const int fontId, const int x, const int y, con
     if (parseBismillahMarker(text)) {
       std::string bismillahShaped;
       appendUtf8(bismillahShaped, 0xFDFD);
-      fontCacheManager_->recordArabicText(bismillahShaped.c_str(), bismillahFontId_);
+      fontCacheManager_->recordText(bismillahShaped.c_str(), bismillahFontId_, EpdFontFamily::REGULAR);
       return;
     }
 
@@ -1273,7 +1263,7 @@ void GfxRenderer::drawArabicText(const int fontId, const int x, const int y, con
         std::string bannerGlyphs;
         appendUtf8(bannerGlyphs, bannerNameCp);
         appendUtf8(bannerGlyphs, SURAH_BANNER_ORNAMENT_CP);
-        fontCacheManager_->recordArabicText(bannerGlyphs.c_str(), surahBannerFontId_);
+        fontCacheManager_->recordText(bannerGlyphs.c_str(), surahBannerFontId_, EpdFontFamily::REGULAR);
 
         // Both labels (word + digits) come from surahBannerLabelFontId_, a
         // DIFFERENT font than resolvedArabicFontId (see its own comment) --
@@ -1287,7 +1277,7 @@ void GfxRenderer::drawArabicText(const int fontId, const int x, const int y, con
             if (cp != CARTOUCHE_SPACE_CP) appendUtf8(labelShaped, cp);
           }
         }
-        fontCacheManager_->recordArabicText(labelShaped.c_str(), surahBannerLabelFontId_);
+        fontCacheManager_->recordText(labelShaped.c_str(), surahBannerLabelFontId_, EpdFontFamily::REGULAR);
         return;
       }
     }
@@ -1307,7 +1297,7 @@ void GfxRenderer::drawArabicText(const int fontId, const int x, const int y, con
         // in this scan.
         std::string digitsShaped;
         for (int i = 0; i < digitCount; i++) appendUtf8(digitsShaped, digits[i]);
-        fontCacheManager_->recordArabicText(digitsShaped.c_str(), arabicDigitFallbackFontId_);
+        fontCacheManager_->recordText(digitsShaped.c_str(), arabicDigitFallbackFontId_, EpdFontFamily::REGULAR);
       }
       // else: digits come from arabicDigitFallbackFontId_, nothing to record here.
     } else if (parseSurahMedallionMarker(text, digits, digitCount)) {
@@ -1319,7 +1309,7 @@ void GfxRenderer::drawArabicText(const int fontId, const int x, const int y, con
     } else {
       for (const uint32_t cp : ArabicShaper::shapeText(text, fontHasGlyph)) appendUtf8(shaped, cp);
     }
-    fontCacheManager_->recordArabicText(shaped.c_str(), resolvedArabicFontId);
+    fontCacheManager_->recordText(shaped.c_str(), resolvedArabicFontId, EpdFontFamily::REGULAR);
     return;
   }
 
@@ -2380,13 +2370,15 @@ void GfxRenderer::drawIcon(const uint8_t bitmap[], const int x, const int y, con
   }
 }
 
-void GfxRenderer::drawBitmap(const Bitmap& bitmap, const int x, const int y, const int maxWidth, const int maxHeight,
+bool GfxRenderer::drawBitmap(const Bitmap& bitmap, const int x, const int y, const int maxWidth, const int maxHeight,
                              const float cropX, const float cropY) const {
-  if (fontCacheManager_ && fontCacheManager_->isScanning()) return;
+  if (fontCacheManager_ && fontCacheManager_->isScanning()) {
+    LOG_ERR("GFX", "!! Bitmap draw skipped: font cache scan in progress");
+    return false;
+  }
   // For 1-bit bitmaps, use optimized 1-bit rendering path (no crop support for 1-bit)
   if (bitmap.is1Bit() && cropX == 0.0f && cropY == 0.0f) {
-    drawBitmap1Bit(bitmap, x, y, maxWidth, maxHeight);
-    return;
+    return drawBitmap1Bit(bitmap, x, y, maxWidth, maxHeight);
   }
 
   float scale = 1.0f;
@@ -2428,7 +2420,7 @@ void GfxRenderer::drawBitmap(const Bitmap& bitmap, const int x, const int y, con
     LOG_ERR("GFX", "!! Failed to allocate BMP row buffers");
     free(outputRow);
     free(rowBytes);
-    return;
+    return false;
   }
 
   for (int bmpY = 0; bmpY < (bitmap.getHeight() - cropPixY); bmpY++) {
@@ -2447,7 +2439,7 @@ void GfxRenderer::drawBitmap(const Bitmap& bitmap, const int x, const int y, con
       LOG_ERR("GFX", "Failed to read row %d from bitmap", bmpY);
       free(outputRow);
       free(rowBytes);
-      return;
+      return false;
     }
 
     if (screenY < 0) {
@@ -2497,9 +2489,10 @@ void GfxRenderer::drawBitmap(const Bitmap& bitmap, const int x, const int y, con
   const int renderedWidth = isScaled ? static_cast<int>(std::floor((sourceWidth - 1) * scale)) + 1 : sourceWidth;
   const int renderedHeight = isScaled ? static_cast<int>(std::floor((sourceHeight - 1) * scale)) + 1 : sourceHeight;
   preserveImagePolarity(x, y, renderedWidth, renderedHeight);
+  return true;
 }
 
-void GfxRenderer::drawBitmap1Bit(const Bitmap& bitmap, const int x, const int y, const int maxWidth,
+bool GfxRenderer::drawBitmap1Bit(const Bitmap& bitmap, const int x, const int y, const int maxWidth,
                                  const int maxHeight) const {
   float scale = 1.0f;
   bool isScaled = false;
@@ -2539,7 +2532,7 @@ void GfxRenderer::drawBitmap1Bit(const Bitmap& bitmap, const int x, const int y,
     free(rowBytes);
     free(blackCount);
     free(totalCount);
-    return;
+    return false;
   }
 
   // Emit one accumulated destination row: 3-tone re-dither of the bucket
@@ -2575,7 +2568,7 @@ void GfxRenderer::drawBitmap1Bit(const Bitmap& bitmap, const int x, const int y,
       free(rowBytes);
       free(blackCount);
       free(totalCount);
-      return;
+      return false;
     }
 
     // Calculate screen Y based on whether BMP is top-down or bottom-up
@@ -2643,6 +2636,7 @@ void GfxRenderer::drawBitmap1Bit(const Bitmap& bitmap, const int x, const int y,
   const int renderedHeight =
       isScaled ? static_cast<int>(std::floor((bitmap.getHeight() - 1) * scale)) + 1 : bitmap.getHeight();
   preserveImagePolarity(x, y, renderedWidth, renderedHeight);
+  return true;
 }
 
 void GfxRenderer::preserveImagePolarity(const int x, const int y, const int width, const int height) const {
@@ -2790,9 +2784,16 @@ void GfxRenderer::invertScreen() const {
   }
 }
 
-void GfxRenderer::displayBuffer(const HalDisplay::RefreshMode refreshMode, const bool forceCleanBaseOnHalf) const {
+HalDisplay::RefreshMode GfxRenderer::applyPromotedRefresh(const HalDisplay::RefreshMode refreshMode) const {
+  if (!promotedRefreshPending_) return refreshMode;
+  promotedRefreshPending_ = false;
+  return promotedRefresh_;
+}
+
+void GfxRenderer::displayBuffer(HalDisplay::RefreshMode refreshMode, const bool forceCleanBaseOnHalf) const {
   auto elapsed = millis() - start_ms;
   LOG_DBG("GFX", "Time = %lu ms from clearScreen to displayBuffer", elapsed);
+  refreshMode = applyPromotedRefresh(refreshMode);
   // Dark mode inverts only for the panel push, then restores -- everything
   // that reads the framebuffer afterwards sees normal polarity (see
   // setDarkMode). Two 48KB XOR passes ~= 1-2ms at 160MHz, negligible next to
@@ -2802,7 +2803,8 @@ void GfxRenderer::displayBuffer(const HalDisplay::RefreshMode refreshMode, const
   if (darkMode_) invertScreen();
 }
 
-void GfxRenderer::displayBufferAsync(const HalDisplay::RefreshMode refreshMode, const bool forceCleanBaseOnHalf) const {
+void GfxRenderer::displayBufferAsync(HalDisplay::RefreshMode refreshMode, const bool forceCleanBaseOnHalf) const {
+  refreshMode = applyPromotedRefresh(refreshMode);
   // Fading fix relies on turnOffScreen, which the async SDK primitive has no
   // hook for at all -- keep those users on the blocking path unconditionally.
   if (fadingFix) {
@@ -3493,7 +3495,7 @@ bool GfxRenderer::storeBwBuffer() {
  * It should be called to restore the BW buffer state after grayscale rendering is complete.
  * Uses chunked restoration to match chunked storage.
  */
-void GfxRenderer::restoreBwBuffer() {
+void GfxRenderer::restoreBwBuffer(const bool resyncPanelBaseline) {
   // Check if all chunks are allocated
   bool missingChunks = false;
   for (const auto& bwBufferChunk : bwBufferChunks) {
@@ -3514,7 +3516,9 @@ void GfxRenderer::restoreBwBuffer() {
     memcpy(frameBuffer + offset, bwBufferChunks[i], chunkSize);
   }
 
-  display.cleanupGrayscaleBuffers(frameBuffer);
+  if (resyncPanelBaseline) {
+    display.cleanupGrayscaleBuffers(frameBuffer);
+  }
 
   freeBwBufferChunks();
   LOG_DBG("GFX", "Restored and freed BW buffer chunks");

@@ -19,14 +19,20 @@
 #include "FouladEbooksConfig.h"
 #include "FouladOpdsHooks.h"
 #include "MappedInputManager.h"
+#include "MidadArabicKeyboard.h"
 #include "OpdsCoverCache.h"
 #include "OpdsServerStore.h"
 #include "SilentRestart.h"
 #include "activities/network/WifiSelectionActivity.h"
+#include "activities/settings/OtaUpdateScreenModel.h"
 #include "activities/util/KeyboardEntryActivity.h"
 #include "components/TileCover.h"
 #include "components/UITheme.h"
 #include "components/icons/book.h"
+#include "components/icons/folder.h"
+#include "components/icons/library.h"
+#include "components/icons/recent.h"
+#include "components/icons/search.h"
 #include "fontIds.h"
 #include "network/HttpDownloader.h"
 #include "util/BookCacheUtils.h"
@@ -155,19 +161,14 @@ void OpdsBookBrowserActivity::onExit() {
 
 void OpdsBookBrowserActivity::loop() {
   if (state == BrowserState::UPDATE_PROMPT) {
-    if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
-      // Reboots into the OTA flow rather than downloading here: this session has an
-      // OPDS feed and its cover cache resident, and the firmware download needs more
-      // contiguous heap than that leaves. Does not return.
-      silentRestartToOtaCheck();
-      return;
-    }
-    if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
-      state = BrowserState::BROWSING;  // declined; carry on browsing
-      requestUpdate();
-      return;
-    }
-    return;  // nothing else acts while the offer is up
+    // The popup owns all input here: option taps and Confirm/Back button
+    // handling both route through it (see maybeOfferFirmwareUpdate for the
+    // selection callback).
+    if (updatePopup.handleInput(mappedInput, [this] { requestUpdate(); })) return;
+    // Popup dismissed without a selection (Back, or a tap outside): declined.
+    state = BrowserState::BROWSING;
+    requestUpdate();
+    return;
   }
 
   maybeOfferFirmwareUpdate();
@@ -193,6 +194,24 @@ void OpdsBookBrowserActivity::loop() {
   }
 
   if (state == BrowserState::ERROR) {
+    // Touch retry: the error and empty states have no on-screen control on a
+    // touch board (the hint bar is suppressed there), so the whole page is the
+    // Retry target -- see the STR_TAP_TO_RETRY hint render() draws. Back is
+    // still the left-edge back-swipe, which MappedInputManager already folds
+    // into Button::Back below.
+    int tapX = 0;
+    int tapY = 0;
+    if (mappedInput.wasScreenTapped(tapX, tapY)) {
+      if (WiFi.status() == WL_CONNECTED && WiFi.localIP() != IPAddress(0, 0, 0, 0)) {
+        state = BrowserState::LOADING;
+        statusMessage = tr(STR_LOADING);
+        requestUpdate();
+        fetchFeed(currentPath);
+      } else {
+        launchWifiSelection();
+      }
+      return;
+    }
     if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
       if (WiFi.status() == WL_CONNECTED && WiFi.localIP() != IPAddress(0, 0, 0, 0)) {
         state = BrowserState::LOADING;
@@ -228,17 +247,15 @@ void OpdsBookBrowserActivity::loop() {
     // selector vanished.
     const bool onGridItem = !entries.empty() && isGridItem(entries[selectorIndex]);
 
+    // Touch runs first and, when it acts, consumes the frame -- a tap or swipe
+    // must not also fall through to the button handlers below. Everything it
+    // does routes into activateEntry()/swipePage(), the same calls Confirm and
+    // a held Down/Right make, so touch adds an input path rather than a second
+    // set of behaviour.
+    if (handleBrowsingTouch(layout)) return;
+
     if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-      if (!entries.empty()) {
-        const auto& entry = entries[selectorIndex];
-        if (entry.type == OpdsEntryType::SEARCH) {
-          launchSearch();
-        } else if (entry.type == OpdsEntryType::BOOK) {
-          downloadBook(entry);
-        } else {
-          navigateToEntry(entry);
-        }
-      }
+      if (!entries.empty()) activateEntry(selectorIndex);
     } else if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
       navigateBack();
     }
@@ -276,13 +293,7 @@ void OpdsBookBrowserActivity::loop() {
       // wrap to page 1 with no auto-advance ever firing. Detecting the wrap
       // itself (candidate index jumping backwards on a forward move, or
       // forwards on a backward move) covers every direction and page shape.
-      auto goToFeedPage = [this](const bool forward) {
-        pendingGridSelect = forward ? PendingGridSelect::FirstBook : PendingGridSelect::LastBook;
-        const std::string& url = forward ? feedNextUrl : feedPrevUrl;
-        browseLog(std::string(forward ? "AUTO-NEXT -> " : "AUTO-PREV -> ") + url);
-        navigateToEntry(OpdsEntry{OpdsEntryType::NAVIGATION, "", "", url, ""});
-      };
-      auto moveUp = [this, layout, goToFeedPage] {
+      auto moveUp = [this, layout] {
         if (selectorIndex == layout.bookStart && layout.topNavCount > 0) {
           // The row directly above the grid, not the top of the strip -- with a search
           // row now sitting above Prev Page, jumping to 0 would skip past it.
@@ -299,7 +310,7 @@ void OpdsBookBrowserActivity::loop() {
         selectorIndex = layout.bookStart + candidate;
         requestUpdate();
       };
-      auto moveDown = [this, layout, goToFeedPage] {
+      auto moveDown = [this, layout] {
         if (selectorIndex == layout.bookStart + layout.bookCount - 1 &&
             layout.bottomNavStart < static_cast<int>(entries.size())) {
           selectorIndex = layout.bottomNavStart;
@@ -315,7 +326,7 @@ void OpdsBookBrowserActivity::loop() {
         selectorIndex = layout.bookStart + candidate;
         requestUpdate();
       };
-      auto moveLeft = [this, layout, goToFeedPage] {
+      auto moveLeft = [this, layout] {
         const int local = selectorIndex - layout.bookStart;
         const int candidate = moveHorizontalInGrid(local, layout.bookCount, false);
         if (candidate >= local && !feedPrevUrl.empty()) {
@@ -325,7 +336,7 @@ void OpdsBookBrowserActivity::loop() {
         selectorIndex = layout.bookStart + candidate;
         requestUpdate();
       };
-      auto moveRight = [this, layout, goToFeedPage] {
+      auto moveRight = [this, layout] {
         const int local = selectorIndex - layout.bookStart;
         const int candidate = moveHorizontalInGrid(local, layout.bookCount, true);
         if (candidate <= local && !feedNextUrl.empty()) {
@@ -375,22 +386,135 @@ void OpdsBookBrowserActivity::loop() {
   }
 }
 
+void OpdsBookBrowserActivity::activateEntry(const int index) {
+  if (index < 0 || index >= static_cast<int>(entries.size())) return;
+  const auto& entry = entries[index];
+  if (entry.type == OpdsEntryType::SEARCH) {
+    launchSearch();
+  } else if (entry.type == OpdsEntryType::BOOK) {
+    downloadBook(entry);
+  } else {
+    navigateToEntry(entry);
+  }
+}
+
+void OpdsBookBrowserActivity::goToFeedPage(const bool forward) {
+  pendingGridSelect = forward ? PendingGridSelect::FirstBook : PendingGridSelect::LastBook;
+  const std::string& url = forward ? feedNextUrl : feedPrevUrl;
+  browseLog(std::string(forward ? "AUTO-NEXT -> " : "AUTO-PREV -> ") + url);
+  navigateToEntry(OpdsEntry{OpdsEntryType::NAVIGATION, "", "", url, ""});
+}
+
+void OpdsBookBrowserActivity::swipePage(const GridLayout& layout, const int pageDelta) {
+  if (entries.empty() || pageDelta == 0) return;
+  const bool forward = pageDelta > 0;
+
+  if (!layout.isGridPage) {
+    // Plain list: exactly what holding Down/Up already does.
+    const int pageItems = getListPageItems(getListRowHeight());
+    selectorIndex = forward ? ButtonNavigator::nextPageIndex(selectorIndex, entries.size(), pageItems)
+                            : ButtonNavigator::previousPageIndex(selectorIndex, entries.size(), pageItems);
+    requestUpdate();
+    return;
+  }
+
+  // Grid page: move a whole page of covers, and hand off to the feed's own
+  // next/previous link at the ends rather than wrapping around the 25 books
+  // held in memory (which made the catalogue appear to repeat).
+  // Pages from the grid page actually on screen, resolved by the same rule
+  // render() and the hit test use -- a selection parked on a strip row shows
+  // page 0, so a swipe from there must move off page 0.
+  const int currentPageStart = OpdsBrowserLayout::gridPageStart(
+      OpdsBrowserLayout::gridLocalSelector(layout, selectorIndex), layout.itemsPerPage);
+  const int targetPageStart = currentPageStart + pageDelta * layout.itemsPerPage;
+
+  if (targetPageStart >= layout.bookCount) {
+    if (!feedNextUrl.empty()) goToFeedPage(true);
+    return;
+  }
+  if (targetPageStart < 0) {
+    if (!feedPrevUrl.empty()) goToFeedPage(false);
+    return;
+  }
+  // Land on the page's first cover going forward, its last going back, so the
+  // reading direction continues -- the same landing rule goToFeedPage() uses.
+  const int cellsOnTargetPage = OpdsBrowserLayout::gridCellsOnPage(layout, targetPageStart);
+  if (cellsOnTargetPage <= 0) return;
+  selectorIndex = layout.bookStart + targetPageStart + (forward ? 0 : cellsOnTargetPage - 1);
+  requestUpdate();
+}
+
+bool OpdsBookBrowserActivity::handleBrowsingTouch(const GridLayout& layout) {
+  if (entries.empty()) return false;
+
+  // A left-edge right-swipe is the global Back gesture, which
+  // MappedInputManager already reports as Button::Back -- excluding it here
+  // stops one gesture from both going back and paging (the same exclusion the
+  // reader's swipe page-turns make).
+  if (!mappedInput.wasBackGesture()) {
+    switch (mappedInput.wasSwipe()) {
+      case MappedInputManager::SwipeDir::Left:
+      case MappedInputManager::SwipeDir::Up:
+        swipePage(layout, 1);
+        return true;
+      case MappedInputManager::SwipeDir::Right:
+      case MappedInputManager::SwipeDir::Down:
+        swipePage(layout, -1);
+        return true;
+      case MappedInputManager::SwipeDir::None:
+        break;
+    }
+  }
+
+  int tapX = 0;
+  int tapY = 0;
+  if (!mappedInput.wasScreenTapped(tapX, tapY)) return false;
+
+  // Grow each cover's hit zone halfway into the surrounding gutter so the gaps
+  // between covers are not dead. Button boards never reach here (no digitiser
+  // to report a tap), and pass 0 in the host tests for exact-bounds behaviour.
+  const int touchSlop = mappedInput.hasTouch() ? OpdsBrowserLayout::GUTTER / 2 : 0;
+  const auto hit = OpdsBrowserLayout::hitTest(tapX, tapY, layout, renderer.getScreenWidth(), renderer.getScreenHeight(),
+                                              getListRowHeight(), getCaptionLineHeight(),
+                                              static_cast<int>(entries.size()), selectorIndex, touchSlop);
+  if (hit.kind == OpdsBrowserLayout::HitKind::None) return false;
+
+  // Move the selection to what was tapped before acting on it, so the button
+  // and touch paths leave the activity in the same state -- and so returning to
+  // this page lands the selector where the user last was.
+  selectorIndex = hit.entryIndex;
+  activateEntry(hit.entryIndex);
+  return true;
+}
+
 void OpdsBookBrowserActivity::render(RenderLock&&) {
   if (state == BrowserState::BROWSING && browsingFramesRendered < 2) browsingFramesRendered++;
 
   if (state == BrowserState::UPDATE_PROMPT) {
     const auto& metrics = UITheme::getInstance().getMetrics();
     const int lineHeight = renderer.getLineHeight(UI_10_FONT_ID);
-    const int top = (renderer.getScreenHeight() - lineHeight * 3) / 2;
+    const int pageWidth = renderer.getScreenWidth();
     renderer.clearScreen();
-    GUI.drawHeader(renderer, Rect{0, metrics.topPadding, renderer.getScreenWidth(), metrics.headerHeight},
-                   tr(STR_UPDATE));
-    renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_NEW_UPDATE), true, EpdFontFamily::BOLD);
-    renderer.drawCenteredText(
-        UI_10_FONT_ID, top + lineHeight + metrics.verticalSpacing,
-        (std::string(tr(STR_NEW_VERSION)) + FouladDeviceTracking::pendingFirmwareUpdate()).c_str());
-    const auto labels = mappedInput.mapLabels(tr(STR_CANCEL), tr(STR_UPDATE), "", "");
-    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+    GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_UPDATE));
+    // Version info sits in the upper part of the screen so the centered
+    // Cancel/Update popup doesn't cover it (same layout as OtaUpdateActivity's
+    // confirmation screen).
+    const int infoTop = renderer.getScreenHeight() / 6;
+    renderer.drawTextInWidth(UI_10_FONT_ID, metrics.contentSidePadding, infoTop,
+                             pageWidth - metrics.contentSidePadding * 2,
+                             (std::string(tr(STR_CURRENT_VERSION)) + CROSSPOINT_VERSION).c_str());
+    // Strip the tag's conventional leading 'v'/'V' so this reads consistently
+    // next to the bare "Current version:" line above.
+    std::string offeredDisplay = FouladDeviceTracking::pendingFirmwareUpdate();
+    if (!offeredDisplay.empty() && (offeredDisplay[0] == 'v' || offeredDisplay[0] == 'V')) {
+      offeredDisplay.erase(0, 1);
+    }
+    renderer.drawTextInWidth(UI_10_FONT_ID, metrics.contentSidePadding, infoTop + lineHeight + metrics.verticalSpacing,
+                             pageWidth - metrics.contentSidePadding * 2,
+                             (std::string(tr(STR_NEW_VERSION)) + offeredDisplay).c_str());
+    // Draws the Cancel/Update dialog and the buffer; the popup is the control
+    // surface on every input path (touch and physical buttons alike).
+    if (updatePopup.processRender(renderer, mappedInput)) return;
     renderer.displayBuffer();
     return;
   }
@@ -435,6 +559,13 @@ void OpdsBookBrowserActivity::render(RenderLock&&) {
   if (state == BrowserState::ERROR) {
     renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 - 20, tr(STR_ERROR_MSG));
     renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 + 10, errorMessage.c_str());
+    // BaseTheme::drawButtonHints suppresses the hint bar on touch hardware, so
+    // without this the error and empty states would offer no visible way out at
+    // all there -- the same gap the firmware update offer had before it moved to
+    // OptionPopup. A tap anywhere retries; the back-swipe still goes back.
+    if (mappedInput.hasTouch()) {
+      renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 + 50, tr(STR_TAP_TO_RETRY));
+    }
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_RETRY), "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
     renderer.displayBuffer();
@@ -518,46 +649,28 @@ void OpdsBookBrowserActivity::render(RenderLock&&) {
   if (entries.empty()) {
     renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2, tr(STR_NO_ENTRIES));
   } else if (!layout.isGridPage) {
-    // Plain text list (category/navigation-only pages). Row height is kept tight and
-    // uniform (see getListRowHeight()) so Arabic and Latin rows match visually.
+    // Plain text list -- the Library landing and every category page. Rows are
+    // placed by OpdsBrowserLayout::listRowRect(), the same function loop()
+    // hit-tests taps against.
     const int rowHeight = getListRowHeight();
     const int pageItems = getListPageItems(rowHeight);
-    const auto pageStartIndex = selectorIndex / pageItems * pageItems;
-    // Extend the highlight downward only, not split symmetrically above/below: text draws
-    // from a fixed top anchor (y = row top, baseline = y + font ascender), and Arabic's
-    // larger ascender+descender sum extends the glyph bounds further DOWN from that same
-    // top -- the top of the glyph doesn't move. Splitting the extra height evenly (an
-    // earlier attempt) only gave half the needed room at the bottom and still clipped it.
-    renderer.fillRect(0, GRID_CONTENT_TOP + (selectorIndex % pageItems) * rowHeight - 2, pageWidth - 1,
-                      getListRowHighlightHeight(entries[selectorIndex].title));
-
-    for (size_t i = pageStartIndex; i < entries.size() && i < static_cast<size_t>(pageStartIndex + pageItems); i++) {
-      const auto& entry = entries[i];
-      std::string displayText = (entry.type != OpdsEntryType::BOOK) ? "> " + entry.title : entry.title;
-      if (entry.type == OpdsEntryType::BOOK && !entry.author.empty()) displayText += " - " + entry.author;
-      auto item = renderer.truncatedText(UI_10_FONT_ID, displayText.c_str(), pageWidth - 40);
-      renderer.drawTextInWidth(UI_10_FONT_ID, 20, GRID_CONTENT_TOP + (i % pageItems) * rowHeight, pageWidth - 40,
-                               item.c_str(), i != static_cast<size_t>(selectorIndex));
+    const int pageStartIndex = OpdsBrowserLayout::listPageStart(selectorIndex, pageItems);
+    const int entryCount = static_cast<int>(entries.size());
+    for (int i = pageStartIndex; i < entryCount && i < pageStartIndex + pageItems; i++) {
+      const auto row = OpdsBrowserLayout::listRowRect(pageWidth, i - pageStartIndex, rowHeight);
+      drawListRow(entries[i], row.y, i == selectorIndex);
     }
   } else {
-    // Nav strip above the grid (e.g. a "Prev Page" entry). Same tight row height as the
-    // plain list above.
+    // Nav strip above the grid (a Search row, a "Prev Page" entry).
     const int rowHeight = getListRowHeight();
-    int y = GRID_CONTENT_TOP;
     for (int i = 0; i < layout.topNavCount; i++) {
-      const auto& entry = entries[i];
-      auto item = renderer.truncatedText(UI_10_FONT_ID, ("> " + entry.title).c_str(), pageWidth - 40);
-      if (i == selectorIndex) {
-        // Extends downward only -- see the plain-list highlight above for why.
-        renderer.fillRect(0, y - 2, pageWidth - 1, getListRowHighlightHeight(entry.title));
-      }
-      renderer.drawTextInWidth(UI_10_FONT_ID, 20, y, pageWidth - 40, item.c_str(), i != selectorIndex);
-      y += rowHeight;
+      const auto row = OpdsBrowserLayout::topStripRowRect(pageWidth, i, rowHeight);
+      drawListRow(entries[i], row.y, i == selectorIndex);
     }
-    const bool selectionInGrid = onGridItem;
-    const int localSelector = selectionInGrid ? selectorIndex - layout.bookStart : 0;
-    gridPageStart = (localSelector / layout.itemsPerPage) * layout.itemsPerPage;
-    const int pageCount = std::min(layout.itemsPerPage, layout.bookCount - gridPageStart);
+
+    gridPageStart = OpdsBrowserLayout::gridPageStart(OpdsBrowserLayout::gridLocalSelector(layout, selectorIndex),
+                                                     layout.itemsPerPage);
+    const int pageCount = OpdsBrowserLayout::gridCellsOnPage(layout, gridPageStart);
 
     for (int i = 0; i < pageCount; i++) {
       // Screen was just cleared, so no per-cell erase is needed here -- only the
@@ -565,20 +678,13 @@ void OpdsBookBrowserActivity::render(RenderLock&&) {
       drawGridCell(layout, gridPageStart, i, /*eraseFirst=*/false);
     }
 
-    // Nav strip below the grid (e.g. a "Next Page" entry). Same tight row height.
-    const int bottomCount = static_cast<int>(entries.size()) - layout.bottomNavStart;
-    if (bottomCount > 0) {
-      int by = pageHeight - GRID_BOTTOM_MARGIN - bottomCount * rowHeight;
-      for (int i = layout.bottomNavStart; i < static_cast<int>(entries.size()); i++) {
-        const auto& entry = entries[i];
-        auto item = renderer.truncatedText(UI_10_FONT_ID, ("> " + entry.title).c_str(), pageWidth - 40);
-        if (i == selectorIndex) {
-          // Extends downward only -- see the plain-list highlight above for why.
-          renderer.fillRect(0, by - 2, pageWidth - 1, getListRowHighlightHeight(entry.title));
-        }
-        renderer.drawTextInWidth(UI_10_FONT_ID, 20, by, pageWidth - 40, item.c_str(), i != selectorIndex);
-        by += rowHeight;
-      }
+    // Nav strip below the grid (a "Next Page" entry), bottom-anchored above the
+    // button hints.
+    const int entryCount = static_cast<int>(entries.size());
+    const int bottomCount = OpdsBrowserLayout::bottomStripCount(layout, entryCount);
+    for (int i = 0; i < bottomCount; i++) {
+      const auto row = OpdsBrowserLayout::bottomStripRowRect(layout, pageWidth, pageHeight, entryCount, i, rowHeight);
+      drawListRow(entries[layout.bottomNavStart + i], row.y, layout.bottomNavStart + i == selectorIndex);
     }
   }
   renderer.displayBuffer();
@@ -624,23 +730,17 @@ bool OpdsBookBrowserActivity::canFastRepaintSelector() const {
 }
 
 void OpdsBookBrowserActivity::drawGridSelectionRing(const GridLayout& layout, const int slot, const bool black) const {
-  const int col = slot % layout.columns;
-  const int row = slot / layout.columns;
-  const int titleHeight = getGridTitleHeight();
-  const int cellX = gridStartXFor(layout) + col * (layout.coverWidth + GRID_GUTTER);
-  const int cellY = gridTopFor(layout) + row * (layout.coverHeight + titleHeight + GRID_GUTTER);
-  renderer.drawRect(cellX - 4, cellY - 4, layout.coverWidth + 8, layout.coverHeight + 8, 4, black);
+  const auto cover = OpdsBrowserLayout::gridCoverRect(layout, renderer.getScreenWidth(), getListRowHeight(),
+                                                      getCaptionLineHeight(), slot);
+  renderer.drawRect(cover.x - 4, cover.y - 4, layout.coverWidth + 8, layout.coverHeight + 8, 4, black);
 }
 
 int OpdsBookBrowserActivity::gridStartXFor(const GridLayout& layout) const {
-  const int totalGridWidth = layout.columns * (layout.coverWidth + GRID_GUTTER) - GRID_GUTTER;
-  return std::max(0, (renderer.getScreenWidth() - totalGridWidth) / 2);
+  return OpdsBrowserLayout::gridStartX(layout, renderer.getScreenWidth());
 }
 
 int OpdsBookBrowserActivity::gridTopFor(const GridLayout& layout) const {
-  // Mirrors where render()'s nav-strip loop leaves its cursor: one row height per strip
-  // entry from the content top, plus a gap when the strip is non-empty.
-  return GRID_CONTENT_TOP + layout.topNavCount * getListRowHeight() + (layout.topNavCount > 0 ? 10 : 0);
+  return OpdsBrowserLayout::gridTop(layout, getListRowHeight());
 }
 
 // One grid cell: cover art (or its fallback), the selection frame, and the wrapped title.
@@ -654,10 +754,10 @@ void OpdsBookBrowserActivity::drawGridCell(const GridLayout& layout, const int p
   const auto& entry = entries[bookIdx];
 
   const int titleHeight = getGridTitleHeight();
-  const int col = slot % layout.columns;
-  const int row = slot / layout.columns;
-  const int cellX = gridStartXFor(layout) + col * (layout.coverWidth + GRID_GUTTER);
-  const int cellY = gridTopFor(layout) + row * (layout.coverHeight + titleHeight + GRID_GUTTER);
+  const auto cover = OpdsBrowserLayout::gridCoverRect(layout, renderer.getScreenWidth(), getListRowHeight(),
+                                                      getCaptionLineHeight(), slot);
+  const int cellX = cover.x;
+  const int cellY = cover.y;
 
   if (eraseFirst) {
     // Clear the cell's whole footprint, selection frame included, before redrawing over a
@@ -684,8 +784,10 @@ void OpdsBookBrowserActivity::drawGridCell(const GridLayout& layout, const int p
         // no-op for the common case where the cache file already matches the cell.
         const int offsetX = std::max(0, (layout.coverWidth - bitmap.getWidth()) / 2);
         const int offsetY = std::max(0, (layout.coverHeight - bitmap.getHeight()) / 2);
-        renderer.drawBitmap(bitmap, cellX + offsetX, cellY + offsetY, layout.coverWidth, layout.coverHeight);
-        drawn = true;
+        // drawBitmap reports whether it actually painted; assuming it did left an
+        // empty outlined cell whenever the blit was skipped (font-cache scan, or a
+        // failed row-buffer allocation) instead of falling back to the tile below.
+        drawn = renderer.drawBitmap(bitmap, cellX + offsetX, cellY + offsetY, layout.coverWidth, layout.coverHeight);
       }
     }
   }
@@ -707,13 +809,14 @@ void OpdsBookBrowserActivity::drawGridCell(const GridLayout& layout, const int p
     renderer.drawRect(cellX - 4, cellY - 4, layout.coverWidth + 8, layout.coverHeight + 8, 4, true);
   }
 
-  const auto titleLines = renderer.wrappedText(SMALL_FONT_ID, entry.title.c_str(), layout.coverWidth, GRID_TITLE_LINES);
+  const auto titleLines =
+      renderer.wrappedText(SMALL_FONT_ID, entry.title.c_str(), layout.coverWidth, OpdsBrowserLayout::TITLE_LINES);
   // Was previously widened per-title for an Arabic title (using the taller Arabic line
   // height between its two lines). Explicit user feedback preferred the gap between
   // lines matching the Latin/English spacing exactly over the extra clipping headroom
   // -- always uses the tight Latin height now; revisit if Arabic titles start clipping.
   const int titleLineHeight = renderer.getLineHeight(SMALL_FONT_ID);
-  int titleY = cellY + layout.coverHeight + GRID_TITLE_TOP_GAP;
+  int titleY = cellY + layout.coverHeight + OpdsBrowserLayout::TITLE_TOP_GAP;
   for (const auto& line : titleLines) {
     renderer.drawTextInWidth(SMALL_FONT_ID, cellX, titleY, layout.coverWidth, line.c_str());
     titleY += titleLineHeight;
@@ -725,7 +828,88 @@ int OpdsBookBrowserActivity::getListRowHeight() const {
   // the Latin rows over extra clipping headroom, so this always uses the tight Latin height
   // regardless of script -- see getListRowHighlightHeight() for where an Arabic-tall selection
   // highlight is still handled separately from this pitch.
-  return renderer.getLineHeight(UI_10_FONT_ID) + LIST_ROW_VERTICAL_PADDING;
+  const int tight = renderer.getLineHeight(UI_10_FONT_ID) + LIST_ROW_VERTICAL_PADDING;
+  if (!listRowsShowIcons()) return tight;
+  // Touch boards render each navigation row with a leading 32px icon and need a
+  // row a fingertip can actually land on, so the pitch grows to fit both. Gated
+  // on touch hardware precisely so button boards keep this value -- and with it
+  // their rows-per-page, page jumps and selection -- bit-for-bit unchanged.
+  return std::max(tight, LIST_ICON_SIZE + LIST_ICON_ROW_PADDING);
+}
+
+bool OpdsBookBrowserActivity::listRowsShowIcons() const { return mappedInput.hasTouch(); }
+
+const uint8_t* OpdsBookBrowserActivity::listRowIcon(const OpdsEntry& entry) const {
+  const bool isPageControl = entry.type == OpdsEntryType::NAVIGATION && !entry.href.empty() &&
+                             (entry.href == feedNextUrl || entry.href == feedPrevUrl);
+  switch (OpdsRowIcon::classify(entry.href, entry.type == OpdsEntryType::SEARCH, entry.type == OpdsEntryType::BOOK,
+                                isPageControl)) {
+    case OpdsRowIcon::Kind::Search:
+      return SearchIcon;
+    case OpdsRowIcon::Kind::AllBooks:
+      return LibraryIcon;
+    case OpdsRowIcon::Kind::Recent:
+      return RecentIcon;
+    case OpdsRowIcon::Kind::Collection:
+      return FolderIcon;
+    case OpdsRowIcon::Kind::Book:
+      return BookIcon;
+    case OpdsRowIcon::Kind::None:
+      break;
+  }
+  return nullptr;
+}
+
+// Draws one navigation/search row: optional leading icon, then the title,
+// inverted when selected. `rowTop` is the row band's top edge as
+// OpdsBrowserLayout places it, so this and the hit test agree by construction.
+void OpdsBookBrowserActivity::drawListRow(const OpdsEntry& entry, const int rowTop, const bool selected) const {
+  const int pageWidth = renderer.getScreenWidth();
+  const int rowHeight = getListRowHeight();
+  const int lineHeight = renderer.getLineHeight(UI_10_FONT_ID);
+  const bool withIcon = listRowsShowIcons();
+  // The icon column is reserved on every row of an icon-bearing page, including
+  // the Prev/Next Page rows that get no icon, so titles stay left-aligned.
+  const int textX = OpdsBrowserLayout::LIST_TEXT_INSET + (withIcon ? LIST_ICON_SIZE + LIST_ICON_GAP : 0);
+  // Tight rows draw from the row top (the original, unchanged placement);
+  // taller icon rows centre the single text line in the band instead.
+  const int textY = withIcon ? rowTop + std::max(0, (rowHeight - lineHeight) / 2) : rowTop;
+
+  if (selected) {
+    if (withIcon) {
+      // An icon row cannot invert: drawIcon() only ever plots black ink, so a
+      // filled black band would swallow the icon whole. Frame the row instead --
+      // the same selection idiom the cover grid already uses, and it reads more
+      // clearly at a glance on e-ink than an inverted bar.
+      renderer.drawRect(0, rowTop, pageWidth - 1, rowHeight, LIST_SELECTION_FRAME, true);
+    } else {
+      // Extends downward only -- text draws from a fixed top anchor and Arabic's
+      // larger ascender+descender sum overshoots that pitch downward, not upward.
+      renderer.fillRect(0, rowTop - OpdsBrowserLayout::LIST_HIGHLIGHT_LIFT, pageWidth - 1,
+                        getListRowHighlightHeight(entry.title));
+    }
+  }
+
+  if (withIcon) {
+    if (const uint8_t* icon = listRowIcon(entry)) {
+      renderer.drawIcon(icon, OpdsBrowserLayout::LIST_TEXT_INSET, rowTop + (rowHeight - LIST_ICON_SIZE) / 2,
+                        LIST_ICON_SIZE);
+    }
+  }
+
+  // A leading "> " marked a row as something you open back when a row was the
+  // only affordance there was. An icon says the same thing better, so the
+  // marker is dropped on icon rows and kept on text-only ones.
+  std::string displayText;
+  if (entry.type != OpdsEntryType::BOOK && !withIcon) displayText = "> ";
+  displayText += entry.title;
+  if (entry.type == OpdsEntryType::BOOK && !entry.author.empty()) displayText += " - " + entry.author;
+
+  const int textWidth = pageWidth - textX - OpdsBrowserLayout::LIST_TEXT_INSET;
+  const auto item = renderer.truncatedText(UI_10_FONT_ID, displayText.c_str(), textWidth);
+  // Icon rows stay black-on-white even when selected -- their selection is the
+  // frame drawn above, not an inverted band.
+  renderer.drawTextInWidth(UI_10_FONT_ID, textX, textY, textWidth, item.c_str(), withIcon || !selected);
 }
 
 int OpdsBookBrowserActivity::getListRowHighlightHeight(const std::string& title) const {
@@ -743,19 +927,21 @@ int OpdsBookBrowserActivity::getListRowHighlightHeight(const std::string& title)
 }
 
 int OpdsBookBrowserActivity::getListPageItems(const int rowHeight) const {
-  const int available = renderer.getScreenHeight() - GRID_CONTENT_TOP - GRID_BOTTOM_MARGIN;
-  return std::max(1, available / rowHeight);
+  return OpdsBrowserLayout::listPageItems(renderer.getScreenHeight(), rowHeight);
+}
+
+int OpdsBookBrowserActivity::getCaptionLineHeight() const {
+  // Worst case unconditionally, not per-page detection: the grid's row spacing
+  // must stay stable regardless of which page is showing, and the Arabic font's
+  // line height runs taller than SMALL_FONT_ID's Latin metrics.
+  return std::max(renderer.getLineHeight(SMALL_FONT_ID), renderer.getLineHeight(NOTOSANSARABIC_8_FONT_ID));
 }
 
 int OpdsBookBrowserActivity::getGridTitleHeight() const {
-  const int lineHeight =
-      std::max(renderer.getLineHeight(SMALL_FONT_ID), renderer.getLineHeight(NOTOSANSARABIC_8_FONT_ID));
-  return GRID_TITLE_TOP_GAP + lineHeight * GRID_TITLE_LINES;
+  return OpdsBrowserLayout::titleHeight(getCaptionLineHeight());
 }
 
 OpdsBookBrowserActivity::GridLayout OpdsBookBrowserActivity::computeGridLayout() const {
-  GridLayout layout;
-
   int firstBookIndex = -1;
   int lastBookIndex = -1;
   for (size_t i = 0; i < entries.size(); i++) {
@@ -765,33 +951,11 @@ OpdsBookBrowserActivity::GridLayout OpdsBookBrowserActivity::computeGridLayout()
     }
   }
 
-  if (firstBookIndex < 0) {
-    return layout;  // isGridPage stays false: pure navigation/category page
-  }
-
-  layout.isGridPage = true;
-  layout.topNavCount = firstBookIndex;
-  layout.bookStart = firstBookIndex;
-  layout.bookCount = lastBookIndex - firstBookIndex + 1;
-  layout.bottomNavStart = lastBookIndex + 1;
-
-  const int pageWidth = renderer.getScreenWidth();
-  const int pageHeight = renderer.getScreenHeight();
-
-  // Column count first, from a target minimum cell width -- then the cover
-  // size is derived to fill the resulting columns edge-to-edge, so covers
-  // are always as big as the actual screen allows rather than a fixed size
-  // that may be much smaller than the cell it sits in.
-  layout.columns = std::max(1, (pageWidth - GRID_GUTTER) / (GRID_MIN_CELL_WIDTH + GRID_GUTTER));
-  layout.coverWidth = (pageWidth - GRID_GUTTER * (layout.columns + 1)) / layout.columns;
-  layout.coverHeight = static_cast<int>(layout.coverWidth * GRID_COVER_ASPECT);
-
-  const int contentHeight = pageHeight - GRID_CONTENT_TOP - GRID_BOTTOM_MARGIN;
-  const int rowHeight = layout.coverHeight + getGridTitleHeight() + GRID_GUTTER;
-  const int rows = std::max(1, contentHeight / rowHeight);
-  layout.itemsPerPage = layout.columns * rows;
-
-  return layout;
+  // getListRowHeight() is passed because the nav strips are drawn at that
+  // height, and the grid is sized against the band they leave.
+  return OpdsBrowserLayout::computeGrid(renderer.getScreenWidth(), renderer.getScreenHeight(), getListRowHeight(),
+                                        getCaptionLineHeight(), static_cast<int>(entries.size()), firstBookIndex,
+                                        lastBookIndex);
 }
 
 // Cover work is the largest transient allocation a catalogue walk makes: an HTTP
@@ -1221,9 +1385,9 @@ void OpdsBookBrowserActivity::launchSearch() {
   // Opens on the Arabic panel when the interface is Arabic: this catalog is mostly
   // Arabic books, and making an Arabic reader press Mode twice before typing a title
   // is the same discoverability failure the search row itself just fixed.
-  auto keyboard = std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_SEARCH), "", 0, InputType::Text,
-                                                          "", /*numericOnly=*/false,
-                                                          /*preferArabic=*/I18N.isRtl());
+  if (I18N.isRtl()) midad_arabic_keyboard::preferForNextEntry();
+  auto keyboard =
+      std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_SEARCH), "", 0, InputType::Text);
   startActivityForResult(std::move(keyboard), [this](const ActivityResult& result) {
     state = BrowserState::BROWSING;
     if (!result.isCancelled) {
@@ -1291,6 +1455,28 @@ void OpdsBookBrowserActivity::maybeOfferFirmwareUpdate() {
   // function may become a network call without moving it off this path entirely.
   gFirmwareOfferShownThisBoot = true;
   state = BrowserState::UPDATE_PROMPT;
+  // The offer must be answerable on every input surface; the popup provides
+  // touch targets and button navigation in one component (see
+  // ota_screen::actionsFor(Screen::LIBRARY_OFFER)).
+  static_assert(ota_screen::actionsFor(ota_screen::Screen::LIBRARY_OFFER).confirmPopup &&
+                    ota_screen::touchOperable(ota_screen::actionsFor(ota_screen::Screen::LIBRARY_OFFER)),
+                "Library update offer must expose a touch-operable Cancel/Update control");
+  const char* options[] = {tr(STR_CANCEL), tr(STR_UPDATE)};
+  // Default the selection to Update so the hardware Confirm button installs
+  // (matching OtaUpdateActivity's confirmation popup); an Update selection
+  // never starts an install directly -- the OTA flow it reboots into asks for
+  // its own confirmation before downloading anything.
+  updatePopup.show(tr(STR_NEW_UPDATE), options, 2, 1, [this](const int idx) {
+    if (idx == 1) {
+      // Reboots into the OTA flow rather than downloading here: this session has an
+      // OPDS feed and its cover cache resident, and the firmware download needs more
+      // contiguous heap than that leaves. Does not return.
+      silentRestartToOtaCheck();
+    } else {
+      state = BrowserState::BROWSING;  // declined; carry on browsing
+      requestUpdate();
+    }
+  });
   requestUpdate();
 }
 
