@@ -121,6 +121,9 @@ HttpDownloader::LastFailure gLastFailure;
 
 void setLastFailure(const HttpDownloader::FailStage stage, const int detail) { gLastFailure = {stage, detail}; }
 
+// Set by HttpDownloader::ScopedHeaders; see its declaration.
+const std::vector<std::pair<std::string, std::string>>* gExtraHeaders = nullptr;
+
 struct Sink {
   std::function<bool(const uint8_t*, size_t)> write;  // returns false to abort the transfer
   HttpDownloader::ProgressCallback progress;
@@ -189,6 +192,9 @@ HttpDownloader::DownloadError runGetWolf(const std::string& startUrl, const std:
       const std::string credentials = username + ":" + password;
       const String encoded = base64::encode(credentials.c_str());
       http.addHeader("Authorization", std::string("Basic ") + encoded.c_str());
+    }
+    if (!crossOriginSeen && gExtraHeaders) {
+      for (const auto& header : *gExtraHeaders) http.addHeader(header.first, header.second);
     }
 
     LOG_DBG("HTTP", "wolfSSL GET: %s", url.c_str());
@@ -330,6 +336,11 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
     const String header = "Basic " + base64::encode(credentials.c_str());
     esp_http_client_set_header(client, "Authorization", header.c_str());
   }
+  if (gExtraHeaders) {
+    for (const auto& header : *gExtraHeaders) {
+      esp_http_client_set_header(client, header.first.c_str(), header.second.c_str());
+    }
+  }
 
   // open()/read() does not auto-follow redirects (only perform() does), so step
   // 30x responses manually. OPDS download endpoints and the GitHub release CDN
@@ -399,6 +410,9 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
         LOG_DBG("HTTP", "redirect changed origin -- dropping Authorization/X-Device-Serial headers");
         esp_http_client_delete_header(client, "Authorization");
         esp_http_client_delete_header(client, "X-Device-Serial");
+        if (gExtraHeaders) {
+          for (const auto& header : *gExtraHeaders) esp_http_client_delete_header(client, header.first.c_str());
+        }
       }
     }
 
@@ -897,6 +911,12 @@ HttpDownloader::DownloadError runGetSecure(const std::string& url, const std::st
 }  // namespace
 
 HttpDownloader::LastFailure HttpDownloader::getLastFailure() { return gLastFailure; }
+
+HttpDownloader::ScopedHeaders::ScopedHeaders(const std::vector<std::pair<std::string, std::string>>& headers) {
+  gExtraHeaders = &headers;
+}
+
+HttpDownloader::ScopedHeaders::~ScopedHeaders() { gExtraHeaders = nullptr; }
 
 bool HttpDownloader::fetchUrl(const std::string& url, Stream& outContent, const std::string& username,
                               const std::string& password) {

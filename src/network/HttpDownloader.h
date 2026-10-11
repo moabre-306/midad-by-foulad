@@ -49,6 +49,18 @@ class HttpDownloader {
   // immediately after that call returned an error.
   static LastFailure getLastFailure();
 
+  // Adds request headers to every GET issued while this object is alive (single
+  // network task, so one active list is enough). Like Authorization, they are
+  // dropped once a redirect leaves the original origin. The list must outlive
+  // this object.
+  class ScopedHeaders {
+   public:
+    explicit ScopedHeaders(const std::vector<std::pair<std::string, std::string>>& headers);
+    ~ScopedHeaders();
+    ScopedHeaders(const ScopedHeaders&) = delete;
+    ScopedHeaders& operator=(const ScopedHeaders&) = delete;
+  };
+
   // Conditional-GET state, for a caller that re-fetches the same URL repeatedly and
   // usually gets the same bytes back. Pass the ETag stored from last time in
   // ifNoneMatch; if the resource is unchanged the server answers 304 and sends no

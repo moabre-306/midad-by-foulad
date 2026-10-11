@@ -28,6 +28,7 @@
 #include "SettingsList.h"
 #include "SilentRestart.h"
 #include "StatusBarSettingsActivity.h"
+#include "TrmnlSettingsActivity.h"
 #include "activities/apps/DictionaryActivity.h"
 #include "activities/browser/FouladLogoutActivity.h"
 #include "activities/browser/FouladQrLoginActivity.h"
@@ -76,6 +77,7 @@ void SettingsActivity::rebuildSettingsLists() {
                           SettingInfo::Action(StrId::STR_REMAP_FRONT_BUTTONS, SettingAction::RemapFrontButtons));
   appsSettings.push_back(SettingInfo::Action(StrId::STR_DICTIONARY, SettingAction::Dictionary));
   appsSettings.push_back(SettingInfo::Action(StrId::STR_KOREADER_SYNC, SettingAction::KOReaderSync));
+  appsSettings.push_back(SettingInfo::Action(StrId::STR_TRMNL, SettingAction::Trmnl));
   // Midad-owned Apps rows (Quran/Games/Tasbih/Stop Watch/Pomodoro/Gym/Debug
   // Logging) -- see src/MidadSettingsList.h. Appended here, after KOReader
   // Sync, so Debug Logging (the last row that function adds) keeps landing
@@ -379,6 +381,9 @@ void SettingsActivity::toggleCurrentSetting() {
         break;
       case SettingAction::KOReaderSync:
         startActivityForResult(std::make_unique<KOReaderSettingsActivity>(renderer, mappedInput), resultHandler);
+        break;
+      case SettingAction::Trmnl:
+        startActivityForResult(std::make_unique<TrmnlSettingsActivity>(renderer, mappedInput), resultHandler);
         break;
       case SettingAction::OPDSBrowser:
         startActivityForResult(std::make_unique<OpdsServerListActivity>(renderer, mappedInput), resultHandler);

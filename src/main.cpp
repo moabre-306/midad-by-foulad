@@ -60,6 +60,9 @@
 #endif
 #include "fontIds.h"
 #include "images/LoadingIcon.h"
+#include "trmnl/TrmnlClient.h"
+#include "trmnl/TrmnlScreen.h"
+#include "trmnl/TrmnlStore.h"
 #include "util/BatteryDiagLog.h"
 #include "util/BleDiagLog.h"
 #include "util/ButtonNavigator.h"
@@ -459,6 +462,10 @@ static bool loadSleepFrameBuffer() {
   return true;
 }
 
+constexpr uint32_t TRMNL_FIRST_REFRESH_SECONDS = 2;
+// Below this charge (and off USB) the TRMNL refresh stops, and only the power button wakes the device.
+constexpr uint16_t TRMNL_MIN_BATTERY_PERCENT = 5;
+
 // Enter deep sleep mode
 void enterDeepSleep(bool fromTimeout = false) {
   HalPowerManager::Lock powerLock;  // Ensure we are at normal CPU frequency for sleep preparation
@@ -526,7 +533,12 @@ void enterDeepSleep(bool fromTimeout = false) {
   display.deepSleep();
   LOG_DBG("MAIN", "Entering deep sleep");
 
-  powerManager.startDeepSleep(gpio);
+  // The TRMNL sleep screen fetches its first fresh screen right after sleep
+  // entry, on a clean boot (see runTrmnlTimerWake()).
+  const bool trmnlRefresh = !isQuickResumeSleep &&
+                            SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::TRMNL &&
+                            TRMNL_STORE.isLinked();
+  powerManager.startDeepSleep(gpio, trmnlRefresh ? TRMNL_FIRST_REFRESH_SECONDS : 0);
 }
 
 // uiOnlyFonts: skip the SD-card reading-font discovery and the Quran self-heal, keeping
@@ -612,6 +624,28 @@ void setupDisplayAndFonts(bool seamless = false, bool uiOnlyFonts = false) {
   }
 
   LOG_DBG("MAIN", "Fonts setup");
+}
+
+// Timer wake while the TRMNL sleep screen is selected: fetch the current
+// screen with no UI, paint it only when it changed, then sleep until the next
+// refresh. The power button wakes into Midad as usual. A timer wake in any
+// other mode goes straight back to button-only sleep.
+void runTrmnlTimerWake() {
+  uint32_t nextRefreshSeconds = 0;
+  if (SETTINGS.sleepScreen != CrossPointSettings::SLEEP_SCREEN_MODE::TRMNL || !TRMNL_STORE.isLinked()) {
+    LOG_INF("MAIN", "Timer wake without TRMNL sleep screen, sleeping");
+  } else if (powerManager.getBatteryPercentage() <= TRMNL_MIN_BATTERY_PERCENT && !gpio.isUsbConnected()) {
+    LOG_INF("MAIN", "Battery low, TRMNL refresh paused until the power button is pressed");
+  } else {
+    const auto result = TrmnlClient::runRefreshCycle(nextRefreshSeconds);
+    if (result == TrmnlClient::Result::Ok) {
+      setupDisplayAndFonts(/*seamless=*/true, /*uiOnlyFonts=*/true);
+      TrmnlScreen::draw(renderer);
+      display.deepSleep();
+    }
+  }
+  halTiltSensor.deepSleep();
+  powerManager.startDeepSleep(gpio, nextRefreshSeconds);
 }
 
 void setup() {
@@ -722,13 +756,15 @@ void setup() {
   I18N.setLanguage(static_cast<Language>(SETTINGS.language));
   KOREADER_STORE.loadFromFile();
   OPDS_STORE.loadFromFile();
+  TRMNL_STORE.loadFromFile();
   UITheme::getInstance().reload();
   ButtonNavigator::setMappedInputManager(mappedInputManager);
 
   // Brightness and warmth are always restored. A normal wake starts with the
   // light off unless Restore Light on Wake is enabled; silent maintenance
   // reboots preserve the live state so they do not unexpectedly go dark.
-  const bool restoreLightOn = SETTINGS.frontlightOn != 0 && (SETTINGS.frontlightRestoreOnWake != 0 || isSilentReboot);
+  const bool restoreLightOn = SETTINGS.frontlightOn != 0 && wakeupReason != HalGPIO::WakeupReason::Timer &&
+                              (SETTINGS.frontlightRestoreOnWake != 0 || isSilentReboot);
   Frontlight.begin(SETTINGS.frontlightBrightness, SETTINGS.frontlightWarmth, restoreLightOn);
 
   switch (wakeupReason) {
@@ -751,6 +787,9 @@ void setup() {
       powerManager.startDeepSleep(gpio);
       break;
 #endif
+    case HalGPIO::WakeupReason::Timer:
+      runTrmnlTimerWake();
+      break;
     case HalGPIO::WakeupReason::AfterFlash:
       // After flashing, just proceed to boot
     case HalGPIO::WakeupReason::Other:

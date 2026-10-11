@@ -74,7 +74,7 @@ void HalPowerManager::setPowerSaving(bool enabled) {
   // Otherwise, no change needed
 }
 
-void HalPowerManager::startDeepSleep(HalGPIO& gpio) const {
+void HalPowerManager::startDeepSleep(HalGPIO& gpio, const uint32_t timerWakeSeconds) const {
 #ifdef ENABLE_SERIAL_LOG
   // Tear down HWCDC so the host sees a clean disconnect and the peripheral
   // doesn't hold power domains that interfere with USB-powered GPIO wake.
@@ -93,9 +93,11 @@ void HalPowerManager::startDeepSleep(HalGPIO& gpio) const {
     // upstream's X3 relies on never happens here — release the hold and drive
     // the latch low explicitly. The hold_en survives deep sleep via the SDK's
     // deepSleep() (esp_sleep_config_gpio_isolate + gpio_deep_sleep_hold_en).
+    // A timer wake needs the battery connected, so the latch is held HIGH instead
+    // (the TRMNL firmware's approach; costs a few mA in deep sleep).
     gpio_hold_dis(XTEINK_C3_GPIO13);
     gpio_set_direction(XTEINK_C3_GPIO13, GPIO_MODE_OUTPUT);
-    gpio_set_level(XTEINK_C3_GPIO13, 0);
+    gpio_set_level(XTEINK_C3_GPIO13, timerWakeSeconds > 0 ? 1 : 0);
     gpio_hold_en(XTEINK_C3_GPIO13);
   }
 #endif
@@ -117,6 +119,13 @@ void HalPowerManager::startDeepSleep(HalGPIO& gpio) const {
     delay(1000);  // allow the PMIC firmware time to drop power
   }
 #endif
+
+  if (timerWakeSeconds > 0) {
+    freeink::PowerManager::waitForPowerButtonRelease();
+    freeink::PowerManager::armPowerButtonWakeup();
+    esp_sleep_enable_timer_wakeup(static_cast<uint64_t>(timerWakeSeconds) * 1000000ULL);
+    freeink::PowerManager::deepSleep();
+  }
 
   // Waits for the power button to be physically released (so holding it doesn't
   // immediately wake the device again), then arms the wake source and sleeps.

@@ -39,6 +39,7 @@
 #include "images/MidadLogo120.h"
 #include "images/MoonIcon.h"
 #include "reading/ReadingStatsStore.h"
+#include "trmnl/TrmnlScreen.h"
 
 namespace {
 // Small circular "today's reading goal" progress ring, drawn as a corner badge
@@ -638,6 +639,10 @@ void SleepActivity::onEnter() {
       }
     case (CrossPointSettings::SLEEP_SCREEN_MODE::DASHBOARD):
       return renderDashboardSleepScreen();
+    case (CrossPointSettings::SLEEP_SCREEN_MODE::TRMNL):
+      // Last downloaded screen; enterDeepSleep() arms the timer that refreshes it.
+      if (TrmnlScreen::draw(renderer)) return;
+      return renderDefaultSleepScreen();
     default:
       return renderDefaultSleepScreen();
   }

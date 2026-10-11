@@ -72,7 +72,9 @@ class HalPowerManager {
 
   // Setup wake up GPIO and enter deep sleep
   // Should be called inside main loop() to handle the currentLockMode
-  void startDeepSleep(HalGPIO& gpio) const;
+  // timerWakeSeconds > 0 also arms a timer wake (TRMNL sleep screen refresh);
+  // the power button still wakes the device as usual.
+  void startDeepSleep(HalGPIO& gpio, uint32_t timerWakeSeconds = 0) const;
 
   // Light-sleep the CPU for LIGHT_SLEEP_SLICE_MS (timer wake; buttons are polled on
   // wake at the same cadence as the delay() this replaces). Returns false WITHOUT

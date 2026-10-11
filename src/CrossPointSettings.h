@@ -29,6 +29,8 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     // there). Appending keeps every existing saved value's meaning intact.
     DASHBOARD = 7,
     TRANSPARENT_CUSTOM = 8,
+    // Shows the TRMNL dashboard and refreshes it on a deep-sleep timer.
+    TRMNL = 9,
     SLEEP_SCREEN_MODE_COUNT
   };
   enum SLEEP_SCREEN_COVER_MODE { FIT = 0, CROP = 1, SLEEP_SCREEN_COVER_MODE_COUNT };

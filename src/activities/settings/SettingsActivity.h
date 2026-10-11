@@ -29,6 +29,7 @@ enum class SettingAction {
   FileTransfer,
   FouladEbooksLogout,
   FouladEbooksLogin,
+  Trmnl,
 };
 
 struct SettingInfo {

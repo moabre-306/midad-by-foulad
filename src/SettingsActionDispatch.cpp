@@ -24,6 +24,7 @@
 #include "activities/settings/OpdsServerListActivity.h"
 #include "activities/settings/SdFirmwareUpdateActivity.h"
 #include "activities/settings/StatusBarSettingsActivity.h"
+#include "activities/settings/TrmnlSettingsActivity.h"
 #include "activities/util/ConfirmationActivity.h"
 
 void dispatchSettingAction(Activity& host, GfxRenderer& renderer, MappedInputManager& mappedInput,
@@ -42,6 +43,9 @@ void dispatchSettingAction(Activity& host, GfxRenderer& renderer, MappedInputMan
       break;
     case SettingAction::KOReaderSync:
       host.startActivityForResult(std::make_unique<KOReaderSettingsActivity>(renderer, mappedInput), resultHandler);
+      break;
+    case SettingAction::Trmnl:
+      host.startActivityForResult(std::make_unique<TrmnlSettingsActivity>(renderer, mappedInput), resultHandler);
       break;
     case SettingAction::OPDSBrowser:
       host.startActivityForResult(std::make_unique<OpdsServerListActivity>(renderer, mappedInput), resultHandler);
