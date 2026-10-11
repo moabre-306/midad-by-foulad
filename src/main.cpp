@@ -27,6 +27,7 @@
 #include <WiFi.h>
 #include <XteinkDetect.h>
 #include <builtinFonts/all.h>
+#include <esp_heap_caps.h>
 
 #include <cstring>
 
@@ -1148,6 +1149,20 @@ void loop() {
         logSerial.printf("RESTART: rebooting now\n");
         logSerial.flush();
         ESP.restart();
+      } else if (cmd == "HEAP") {
+        // Heap by capability, for diagnosing internal-RAM pressure (WiFi/TLS need
+        // large internal DMA-capable blocks even with PSRAM).
+        const uint32_t caps[] = {MALLOC_CAP_INTERNAL, MALLOC_CAP_DMA, MALLOC_CAP_SPIRAM, MALLOC_CAP_DEFAULT};
+        const char* names[] = {"INTERNAL", "DMA", "SPIRAM", "DEFAULT"};
+        for (size_t i = 0; i < 4; i++) {
+          logSerial.printf("HEAP %s: free=%u largest=%u minFree=%u total=%u\n", names[i],
+                           static_cast<unsigned>(heap_caps_get_free_size(caps[i])),
+                           static_cast<unsigned>(heap_caps_get_largest_free_block(caps[i])),
+                           static_cast<unsigned>(heap_caps_get_minimum_free_size(caps[i])),
+                           static_cast<unsigned>(heap_caps_get_total_size(caps[i])));
+        }
+        logSerial.printf("HEAP tasks=%u\n", static_cast<unsigned>(uxTaskGetNumberOfTasks()));
+        heap_caps_print_heap_info(MALLOC_CAP_INTERNAL);
       } else {
         handled = false;
       }
